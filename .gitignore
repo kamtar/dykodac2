@@ -1,3 +1,7 @@
+# project files
+*.cproject
+*.project
+
 # Prerequisites
 *.d
 
@@ -6,6 +10,10 @@
 *.lo
 *.o
 *.obj
+*.axf
+*.elf
+*.bin
+*.hex
 
 # Precompiled Headers
 *.gch
@@ -15,10 +23,6 @@
 *.so
 *.dylib
 *.dll
-
-# Fortran module files
-*.mod
-*.smod
 
 # Compiled Static libraries
 *.lai
