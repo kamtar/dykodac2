@@ -43,9 +43,7 @@ workspace "dykodac"
       targetextension ".elf"
 
       postbuildcommands {      
-      '"%{cfg.gccprefix}objcopy" -O binary "%{cfg.buildtarget.relpath}" "%{cfg.targetdir}/%{cfg.buildtarget.basename}.bin"',
-      '"%{cfg.gccprefix}objdump" --source --all-headers --demangle --debugging --disassemble --file-headers --line-numbers --reloc --syms --wide "%{cfg.buildtarget.relpath}" > %{cfg.targetdir}/%{cfg.buildtarget.basename}.lss',
-      '"%{cfg.gccprefix}size" --format=berkeley --totals "%{cfg.buildtarget.relpath}"'
+       '"%{cfg.gccprefix}size" --format=berkeley --totals "%{cfg.buildtarget.relpath}"'
       }
    
       includedirs {  "./","./**"}
