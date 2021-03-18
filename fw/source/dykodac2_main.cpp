@@ -46,7 +46,7 @@
 #include "fsl_sai.h"
 #include "fsl_gpt.h"
 #include "LedManager.hpp"
-
+#include "usb/audio/uac2/include/UAC2_structs.hpp"
 BoardManager m_board;
 
 TaskBase* tasks[]	//array of pointers to all objects which implement TaskBase
@@ -57,7 +57,6 @@ TaskBase* tasks[]	//array of pointers to all objects which implement TaskBase
 const size_t tasks_size = sizeof(tasks)/sizeof(tasks[0]);
 
 volatile uint32_t g_systickCounter;
-
 
 extern "C" void SysTick_Handler(void)
 {
@@ -81,24 +80,6 @@ void SysTick_DelayTicks(uint32_t n)
 }
 
 
-void InitDCDCDivider()
-{
-	gpt_config_t cfg;
-	cfg.clockSource = kGPT_ClockSource_Ext;
-	cfg.divider = 1;
-	cfg.enableFreeRun = false;
-	cfg.enableMode = true;
-	cfg.enableRunInDbg = true;
-	cfg.enableRunInDoze = true;
-	cfg.enableRunInStop = true;
-	cfg.enableRunInWait = true;
-
-	GPT_Init(GPT2, &cfg);
-	GPT_SetOutputOperationMode(GPT2,   kGPT_OutputCompare_Channel1,  kGPT_OutputOperation_Toggle);
-	GPT_SetOutputCompareValue(GPT2, kGPT_OutputCompare_Channel1, 16);
-	GPT_StartTimer(GPT2);
-}
-
 int main(void)
 {
 
@@ -117,12 +98,9 @@ int main(void)
 	m_board.Set_OutputSafety(false);
 	m_board.m_leds.set_led(Green, 100, 1000);
 
-	m_board.Set_InitLevel(BoardInitLevel::DigitalInit);
-	while(m_board.isBusy());
-	m_board.Set_InitLevel(BoardInitLevel::AnalogPowerOn);
 
-	SysTick_DelayTicks(100);
 	m_board.Set_InitLevel(BoardInitLevel::AnalogInit);
+	while(m_board.isBusy());
 
 	IOMUXC_SetSaiMClkClockSource(IOMUXC_GPR, kIOMUXC_GPR_SAI1MClk1Sel, 3);
 	SAI_Init(SAI1);
@@ -135,6 +113,7 @@ int main(void)
 	SAI_TxEnable(SAI1, true);
 
 	m_board.Set_InitLevel(BoardInitLevel::AnalogReady);
+	while(m_board.isBusy());
 
 	int dat = 0;
     volatile int i =0;

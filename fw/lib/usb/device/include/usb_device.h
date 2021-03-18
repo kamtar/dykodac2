@@ -143,7 +143,7 @@ typedef usb_status_t (*usb_device_endpoint_callback_t)(usb_device_handle handle,
  *
  * @return A USB error code or kStatus_USB_Success.
  */
-typedef usb_status_t (*usb_device_callback_t)(usb_device_handle handle, uint32_t callbackEvent, void *eventParam);
+typedef usb_status_t (*usb_device_callback_t)(usb_device_handle handle, usb_device_event_t callbackEvent, void *eventParam);
 
 /*! @brief Endpoint callback structure */
 typedef struct _usb_device_endpoint_callback_struct

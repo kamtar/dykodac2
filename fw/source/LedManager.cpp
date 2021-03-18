@@ -7,7 +7,7 @@
 
 #include <LedManager.hpp>
 
-LedManager::LedManager(ImxRT_Pin& green, ImxRT_Pin& red) :
+LedManager::LedManager(MamaGpio& green, MamaGpio& red) :
 m_green { Normal, 0, 0, 0, 0, green },
 m_red { Normal, 0, 0, 0, 0, red }
 {

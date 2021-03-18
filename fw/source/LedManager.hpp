@@ -9,6 +9,7 @@
 #define LEDMANAGER_HPP_
 #include "TaskBase.hpp"
 #include "PinManager.hpp"
+#include "hw_specs.h"
 
 enum Colour {
 	Green = 0,
@@ -28,12 +29,12 @@ struct LedBlinker
 	uint16_t off_time;
 	int16_t repeats;
 	uint16_t timer;
-	ImxRT_Pin& led;
+	MamaGpio& led;
 };
 
 class LedManager : public TaskBase {
 public:
-	LedManager(ImxRT_Pin& green, ImxRT_Pin& red);
+	LedManager(MamaGpio& green, MamaGpio& red);
 
 
 	virtual bool Init();
