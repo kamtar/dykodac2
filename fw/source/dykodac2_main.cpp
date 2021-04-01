@@ -46,7 +46,7 @@
 #include "fsl_sai.h"
 #include "fsl_gpt.h"
 #include "LedManager.hpp"
-#include "usb/audio/uac2/include/UAC2_structs.hpp"
+
 BoardManager m_board;
 
 TaskBase* tasks[]	//array of pointers to all objects which implement TaskBase

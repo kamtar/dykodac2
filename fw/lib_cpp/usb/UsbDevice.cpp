@@ -20,7 +20,7 @@ void UsbDevice::Init()
 	if(m_init == true)
 		return;
 
-	 USB_DeviceInit(CONTROLLER_ID, s_device_callback, &m_dev_ptr);
+	 USB_DeviceInit(0, (usb_device_callback_t)s_device_callback, &m_dev_ptr);
 
 	 s_instance_list[s_instance_num]._m = this;
 	 s_instance_list[s_instance_num].dev = m_dev_ptr;

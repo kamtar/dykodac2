@@ -9,11 +9,10 @@
 #define LIB_CPP_USB_AUDIO_UAC2_INCLUDE_UAC2_STRUCTS_HPP_
 #include "usb_misc.hpp"
 
-#define packed __attribute__((packed))
 
 struct empty {
 
-} packed;
+} PACKED;
 namespace KamtarUSB {
 namespace UAC2 {
 
@@ -21,7 +20,7 @@ struct chClusterDesc { //Table 4-1: Audio Channel Cluster Descriptor
 	uint8_t bNrChannels;
 	uint32_t bmChannelConfig;
 	uint8_t iChannelNames;
-} packed;
+} PACKED;
 
 struct stIfAssocDesc { //Table 4-3: Standard Interface Association Descriptor
 	uint8_t bLength;
@@ -32,7 +31,7 @@ struct stIfAssocDesc { //Table 4-3: Standard Interface Association Descriptor
 	uint8_t bFunctionSubClass;	//FUNCTION_SUBCLASS_UNDEFINED Function Subclass code. Currently not used. See Appendix A.2, “Audio Function Subclass Codes”.
 	uint8_t bFunctionProtocol;	//AF_VERSION_02_00 Function Protocol code. Indicates the current version of the specification. See Appendix A.3, “Audio Function Protocol Codes”
 	uint8_t iFunction;			//Index of a string descriptor that describes this interface.
-} packed;
+} PACKED;
 
 struct stACIfDesc { //Table 4-4: Standard AC Interface Descriptor
 	uint8_t bLength;
@@ -44,7 +43,7 @@ struct stACIfDesc { //Table 4-4: Standard AC Interface Descriptor
 	uint8_t bInterfaceSubClass;		//AUDIOCONTROL. Audio Interface Subclass code. Assigned by this specification. See Appendix A.5, “Audio Interface Subclass Codes.”
 	uint8_t bInterfaceProtocol;		//IP_VERSION_02_00 Interface Protocol code. Indicates the current version of the specification. See Appendix A.6, “Audio Interface Protocol Codes”
 	uint8_t iInterface;				//Index of a string descriptor that describes this interface.
-} packed;
+} PACKED;
 
 struct csACInterfaceHeadDesc { //Table 4-5: Class-Specific AC Interface Header Descriptor
 	uint8_t bLength;
@@ -61,7 +60,7 @@ struct csACInterfaceHeadDesc { //Table 4-5: Class-Specific AC Interface Header D
 	    };
 	    uint8_t bmControls;
 	};
-} packed;
+} PACKED;
 
 }
 }
