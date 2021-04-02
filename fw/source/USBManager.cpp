@@ -9,12 +9,14 @@
 #include <assert.h>
 #include <string.h>
 
+//LANGID descriptor with only English(0x0409) supported
 __attribute__ ((aligned (4))) uint8_t USBManager::s_string0[4] = {4, (uint8_t)DescType::String, 0x09, 0x04};
 
-USBManager::USBManager(uint8_t usb_id)
+void USBManager::Init(uint8_t usb_id)
 {
 	s_usb_id = usb_id;
 	s_list_n = 0;
+	s_ConfigDescLen = 0;
 
 	s_dev_desc = DeviceDesc {
 			.Len = sizeof(DeviceDesc),
@@ -77,12 +79,14 @@ void USBManager::SetDeviceString(const char* str)
 	s_DeviceString[1] = (uint8_t)DescType::String;
 }
 
-bool USBManager::register_Descriptor(DescriptorItem& i)
+bool USBManager::register_Descriptor(uint8_t* data, size_t len)
 {
-	assert(s_list_n<DescriptorListMax);
+	for(int i=s_ConfigDescLen; i<(s_ConfigDescLen+len); i++)
+	{
+		s_ConfigDestriptors[i] = data[i];
+	}
 
-	s_desc_list[s_list_n] = i;
-	s_list_n++;
+	s_ConfigDescLen += len;
 	return true;
 }
 

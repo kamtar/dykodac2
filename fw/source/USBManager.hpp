@@ -33,9 +33,9 @@ class USBManager
 	constexpr static uint8_t DeviceNameIndex = 2;
 
 public:
-	USBManager(uint8_t usb_id);
+	static void Init(uint8_t usb_id);
 
-	static bool register_Descriptor(DescriptorItem& i);
+	static bool register_Descriptor(uint8_t* data, size_t len);
 	static bool init_USB();
 
 	static void SetVendorString(const char* str);
