@@ -1,0 +1,10 @@
+/build/
+/.vs/
+*.user
+*.map
+*.elf
+*.bin
+*.hex
+*.lst
+*.su
+
