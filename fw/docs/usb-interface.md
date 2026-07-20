@@ -13,8 +13,8 @@ verified 44.1-family low level until the host explicitly requests 48 kHz and
 starts the guarded switch; 48 kHz selects the verified high level while the
 relay is open.
 
-TinyUSB 0.18.0 at commit
-`86ad6e56c1700e85f1c5678607a762cfe3aa2f47` supplies the class and i.MX RT
+TinyUSB 0.21.0 at commit
+`dae3f9a366bfcddbf9dcf1b48d7500286a849539` supplies the class and i.MX RT
 ChipIdea high-speed device controller. The legacy NXP audio class is not linked.
 The NXP clock and device headers remain the low-level silicon support.
 

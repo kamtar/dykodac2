@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$TinyUsbCommit = '86ad6e56c1700e85f1c5678607a762cfe3aa2f47'
+$TinyUsbCommit = 'dae3f9a366bfcddbf9dcf1b48d7500286a849539'
 $Destination = Join-Path $PSScriptRoot '..\third_party\tinyusb'
 
 if (-not (Test-Path -LiteralPath $Destination)) {
