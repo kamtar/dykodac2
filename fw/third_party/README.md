@@ -5,3 +5,9 @@ TinyUSB is pinned to release 0.21.0, commit
 `tools/fetch_dependencies.ps1` to reproduce the checkout. The production build
 uses TinyUSB's UAC2 device class and ChipIdea high-speed DCD; the legacy NXP USB
 audio class is not compiled.
+
+The `nxp-mcuxpresso` directory is the MIMXRT1011/EVK FlexSPI subset of the NXP
+MCUXpresso SDK required by the firmware build. It includes the device headers,
+CMSIS, selected peripheral drivers, startup code, board clocks, and FlexSPI boot
+sources. Vendor copyright notices are retained in the copied files; upstream
+sources are maintained by [NXP MCUXpresso](https://github.com/nxp-mcuxpresso).

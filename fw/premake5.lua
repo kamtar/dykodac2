@@ -5,7 +5,7 @@ workspace "dykodac2"
     cppdialect "C++17"
     warnings "Extra"
 
-local legacy = "../original_evkmimxrt1010_dev_audio_speaker_bm"
+local nxp_sdk = "third_party/nxp-mcuxpresso"
 
 project "dykodac2_fw"
     kind "ConsoleApp"
@@ -33,36 +33,35 @@ project "dykodac2_fw"
         "third_party/tinyusb/src/tusb.c",
         "third_party/tinyusb/src/common/tusb_fifo.c",
         "third_party/tinyusb/src/device/usbd.c",
-        "third_party/tinyusb/src/device/usbd_control.c",
         "third_party/tinyusb/src/class/audio/audio_device.c",
         "third_party/tinyusb/src/class/hid/hid_device.c",
         "third_party/tinyusb/src/portable/chipidea/ci_hs/dcd_ci_hs.c",
-        legacy .. "/board/clock_config.c",
-        legacy .. "/device/system_MIMXRT1011.c",
-        legacy .. "/drivers/fsl_clock.c",
-        legacy .. "/drivers/fsl_common.c",
-        legacy .. "/drivers/fsl_common_arm.c",
-        legacy .. "/drivers/fsl_gpio.c",
-        legacy .. "/drivers/fsl_flexio.c",
-        legacy .. "/drivers/fsl_flexio_spi.c",
-        legacy .. "/drivers/fsl_dmamux.c",
-        legacy .. "/drivers/fsl_edma.c",
-        legacy .. "/drivers/fsl_sai.c",
-        legacy .. "/drivers/fsl_sai_edma.c",
-        legacy .. "/startup/startup_mimxrt1011.c",
-        legacy .. "/xip/evkmimxrt1010_flexspi_nor_config.c",
-        legacy .. "/xip/fsl_flexspi_nor_boot.c",
+        nxp_sdk .. "/board/clock_config.c",
+        nxp_sdk .. "/device/system_MIMXRT1011.c",
+        nxp_sdk .. "/drivers/fsl_clock.c",
+        nxp_sdk .. "/drivers/fsl_common.c",
+        nxp_sdk .. "/drivers/fsl_common_arm.c",
+        nxp_sdk .. "/drivers/fsl_gpio.c",
+        nxp_sdk .. "/drivers/fsl_flexio.c",
+        nxp_sdk .. "/drivers/fsl_flexio_spi.c",
+        nxp_sdk .. "/drivers/fsl_dmamux.c",
+        nxp_sdk .. "/drivers/fsl_edma.c",
+        nxp_sdk .. "/drivers/fsl_sai.c",
+        nxp_sdk .. "/drivers/fsl_sai_edma.c",
+        nxp_sdk .. "/startup/startup_mimxrt1011.c",
+        nxp_sdk .. "/xip/evkmimxrt1010_flexspi_nor_config.c",
+        nxp_sdk .. "/xip/fsl_flexspi_nor_boot.c",
     }
     includedirs {
         ".",
         "platform/nxp",
         "usb",
         "third_party/tinyusb/src",
-        legacy .. "/board",
-        legacy .. "/CMSIS",
-        legacy .. "/device",
-        legacy .. "/drivers",
-        legacy .. "/xip",
+        nxp_sdk .. "/board",
+        nxp_sdk .. "/CMSIS",
+        nxp_sdk .. "/device",
+        nxp_sdk .. "/drivers",
+        nxp_sdk .. "/xip",
     }
     defines {
         "CPU_MIMXRT1011DAE5A",
