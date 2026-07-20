@@ -60,6 +60,7 @@ project "dykodac2_fw"
         nxp_sdk .. "/board",
         nxp_sdk .. "/CMSIS",
         nxp_sdk .. "/device",
+        nxp_sdk .. "/periph",
         nxp_sdk .. "/drivers",
         nxp_sdk .. "/xip",
     }

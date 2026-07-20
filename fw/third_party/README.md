@@ -11,3 +11,9 @@ MCUXpresso SDK required by the firmware build. It includes the device headers,
 CMSIS, selected peripheral drivers, startup code, board clocks, and FlexSPI boot
 sources. Vendor copyright notices are retained in the copied files; upstream
 sources are maintained by [NXP MCUXpresso](https://github.com/nxp-mcuxpresso).
+
+The RT1010 device layer is vendored from
+`mcux-devices-rt` commit `40ab7654b7fdc774e62e5f0234ab0a7cc6d1aa93`
+(2026-06-25). This revision splits the device register definitions into the
+`periph/` headers; those files are intentionally kept together with the updated
+MIMXRT1011 device header.
