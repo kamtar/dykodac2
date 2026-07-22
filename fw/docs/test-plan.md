@@ -56,7 +56,9 @@ This checkpoint preserves the verified startup order above. Expected behavior:
    External MCLK should measure 22.5792 MHz at GPIO_08.
 6. SAI1/eDMA continuously transmits zeros in 32-bit stereo I2S slots with 24
    valid bits. BCLK should measure 2.8224 MHz and LRCLK 44.1 kHz.
-7. Analog DC/DC enable remains low. Do not connect the relay or attach an analog
+7. The as-built package-pin-60 DC/DC bodge (`GPIO_AD_00/GPIO1_IO14`) starts low
+   and then goes high after safe GPIO initialization. Confirm the converter is
+   running before checking MCLK. Do not connect the relay or attach an analog
    load during this checkpoint.
 
 Verify reset, CS, MOSI, SCK, MCLK, BCLK, and LRCLK on a logic analyzer or scope

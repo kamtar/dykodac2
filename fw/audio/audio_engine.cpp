@@ -100,6 +100,27 @@ void AudioEngine::stop() noexcept {
     DMAMUX_DisableChannel(DMAMUX, dma_channel);
 }
 
+void AudioEngine::capture_dma_diagnostics(std::uint32_t now_ms) noexcept {
+    const auto& tcd = DMA0->TCD[dma_channel];
+    dma_diagnostics_.captured_ms = now_ms;
+    dma_diagnostics_.dmamux_chcfg = DMAMUX->CHCFG[dma_channel];
+    dma_diagnostics_.dma_es = DMA0->ES;
+    dma_diagnostics_.tcd_saddr = tcd.SADDR;
+    dma_diagnostics_.tcd_daddr = tcd.DADDR;
+    dma_diagnostics_.tcd_nbytes = tcd.NBYTES_MLNO;
+    dma_diagnostics_.sai_tcsr = SAI1->TCSR;
+    dma_diagnostics_.sai_tcr1 = SAI1->TCR1;
+    dma_diagnostics_.sai_tcr2 = SAI1->TCR2;
+    dma_diagnostics_.sai_tcr3 = SAI1->TCR3;
+    dma_diagnostics_.sai_tfr0 = SAI1->TFR[0];
+    dma_diagnostics_.dma_erq = static_cast<std::uint16_t>(DMA0->ERQ);
+    dma_diagnostics_.dma_int = static_cast<std::uint16_t>(DMA0->INT);
+    dma_diagnostics_.dma_hrs = static_cast<std::uint16_t>(DMA0->HRS);
+    dma_diagnostics_.tcd_citer = tcd.CITER_ELINKNO;
+    dma_diagnostics_.tcd_biter = tcd.BITER_ELINKNO;
+    dma_diagnostics_.tcd_csr = tcd.CSR;
+}
+
 void AudioEngine::on_dma_complete(bool success) noexcept {
     // Abort can race with an already-pending completion interrupt. Once stop
     // publishes running_=false, that stale callback must not refill/requeue.

@@ -35,7 +35,7 @@ inline constexpr Pin i2s_mclk{"D_MCK", "GPIO_08", 4, "SAI1_MCLK", Direction::Per
 inline constexpr Pin i2s_bclk{"D_I2S_SCK", "GPIO_06", 6, "SAI1_TX_BCLK", Direction::Peripheral, false, InitPhase::AudioClock, Owner::Audio, "64-bit stereo frame"};
 inline constexpr Pin i2s_frame_clock{"D_I2S_FCK", "GPIO_07", 5, "SAI1_TX_SYNC", Direction::Peripheral, false, InitPhase::AudioClock, Owner::Audio, "I2S LR clock"};
 inline constexpr Pin i2s_data{"D_I2S_DATA", "GPIO_04", 9, "SAI1_TX_DATA00", Direction::Peripheral, false, InitPhase::AudioClock, Owner::Audio, "Stereo output"};
-inline constexpr Pin dcdc_enable{"!DCDC_EN", "GPIO_AD_00", 60, "GPIO1_IO14", Direction::Output, false, InitPhase::EarlySafe, Owner::Power, "Working-fw mapping conflicts with schematic GPIO_AD_03/GPIO1_IO17"};
+inline constexpr Pin dcdc_enable{"!DCDC_EN", "GPIO_AD_00", 60, "GPIO1_IO14", Direction::Output, false, InitPhase::EarlySafe, Owner::Power, "As-built prototype hack: low during early boot, then high to enable DC/DC; schematic GPIO_AD_03/GPIO1_IO17 is not used"};
 inline constexpr Pin dcdc_clock{"DCDC_CLK", "GPIO_AD_04", 56, "GPT2_COMPARE1", Direction::Peripheral, false, InitPhase::AnalogPower, Owner::Power, "Not implemented in legacy firmware"};
 inline constexpr Pin mclk_monitor{"D_MCK", "GPIO_AD_05", 55, "GPT2_CAPTURE1", Direction::Input, false, InitPhase::Runtime, Owner::Monitor, "Schematic mapping; do not enable before board verification"};
 
@@ -47,4 +47,3 @@ inline constexpr std::array<const Pin*, 16> all{{
 }};
 } // namespace pins
 } // namespace board
-

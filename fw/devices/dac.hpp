@@ -37,7 +37,7 @@ struct Cs4398DefaultConfiguration {
         {{{dac_registers::write_command, static_cast<std::uint8_t>(dac_registers::Register::Control8),
             static_cast<std::uint8_t>(dac_registers::Control8::RunningControlPort)}}},
         {{{dac_registers::write_command, static_cast<std::uint8_t>(dac_registers::Register::MuteControl),
-            static_cast<std::uint8_t>(dac_registers::MuteControl::BothChannels)}}},
+            static_cast<std::uint8_t>(dac_registers::MuteControl::BothChannelsMuted)}}},
     }};
 };
 

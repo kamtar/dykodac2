@@ -50,8 +50,11 @@ int main() {
           "zero-padded diagnostic command accepted");
     check(usb::maintenance::is_get_events(usb::maintenance::get_events.data(), usb::maintenance::get_events.size()),
           "event-trace command accepted");
+    check(usb::maintenance::is_get_dma_diagnostics(usb::maintenance::get_dma_diagnostics.data(),
+          usb::maintenance::get_dma_diagnostics.size()), "DMA diagnostic command accepted");
     check(sizeof(usb::maintenance::DiagnosticReport) == 64U, "diagnostic report fits HID packet");
     check(sizeof(usb::EventTraceReport) == 64U, "event trace fits HID packet");
+    check(sizeof(usb::maintenance::DmaDiagnosticReport) == 64U, "DMA diagnostic report fits HID packet");
     usb::UsbDevice usb_events;
     for (auto event : {usb::Event::Mounted, usb::Event::Controls, usb::Event::Start})
         check(usb_events.post_event(event), "USB burst event enqueued");
@@ -150,6 +153,8 @@ int main() {
     check(transport.writes[6].bytes[1] == 0x05U && transport.writes[7].bytes[1] == 0x06U &&
           transport.writes[6].bytes[2] == transport.writes[7].bytes[2], "DAC volume updates both channels");
     check(dac.set_mute(false) && !dac.muted(), "DAC unmute command");
+    check(transport.writes.back().bytes == std::array<std::uint8_t, 3>{{0x98U, 0x04U, 0xC0U}},
+          "DAC unmute clears both channel mute bits");
     check(dac.set_mute(true) && dac.muted(), "DAC mute command");
 
     MockDacTransport wrap_transport;

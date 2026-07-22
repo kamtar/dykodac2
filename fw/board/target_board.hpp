@@ -11,6 +11,7 @@ void initialize_audio_pins() noexcept;
 void set_relay_connected(bool connected) noexcept;
 void set_dac_reset(bool asserted) noexcept;
 void set_dac_chip_select(bool asserted) noexcept;
+void set_dcdc_enabled(bool enabled) noexcept;
 void select_clock_family(audio::ClockFamily family) noexcept;
 bool clock_select_level() noexcept;
 void set_red_led(bool on) noexcept;

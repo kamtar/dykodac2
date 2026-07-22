@@ -12,6 +12,10 @@ inline constexpr bool oscillator_44k1_level = false;
 inline constexpr bool oscillator_48k_level = true;
 inline constexpr bool dac_reset_asserted_level = false;
 inline constexpr bool dac_chip_select_asserted_level = false;
+// As-built prototype hack: package pin 60 (GPIO_AD_00/GPIO1_IO14)
+// enables the external analog DC/DC when driven high.
+inline constexpr bool dcdc_disabled_level = false;
+inline constexpr bool dcdc_enabled_level = true;
 
 inline constexpr std::uint32_t relay_release_us = 20'000U;
 inline constexpr std::uint32_t oscillator_settle_us = 50'000U;
@@ -19,4 +23,3 @@ inline constexpr std::uint32_t dac_settle_us = 20'000U;
 inline constexpr std::uint32_t stable_audio_us = 100'000U;
 
 } // namespace config::board
-

@@ -120,7 +120,10 @@ void run_start(Runtime& r, std::uint32_t now) {
         if (r.engine.dma_completions() != r.dma_baseline) {
             r.usb.set_clock_valid(true);
             r.step = StartStep::Prefill;
-        } else if (reached(now, r.deadline)) safe_stop(r, true, StopReason::DmaNoProgress);
+        } else if (reached(now, r.deadline)) {
+            r.engine.capture_dma_diagnostics(now);
+            safe_stop(r, true, StopReason::DmaNoProgress);
+        }
         break;
     case StartStep::Prefill:
         if (r.desired != r.active) { begin_start(r, now); break; }
@@ -155,13 +158,26 @@ void run_start(Runtime& r, std::uint32_t now) {
 
 void update_leds(Runtime& r, std::uint32_t now) {
     const bool fault = r.app.state() == app::State::FaultMuted;
-    if (fault) board::target::set_red_led(((now / 125U) & 1U) != 0U);
-    else if (r.clocks.selected() == audio::ClockFamily::Family48k)
-        board::target::set_red_led(((now / 500U) & 1U) != 0U);
-    else board::target::set_red_led(false);
     const bool playing = r.app.state() == app::State::Playing;
-    const std::uint32_t green_period = r.suspended ? 2'000U : (r.mounted ? 500U : 125U);
-    board::target::set_green_led(playing ? true : (((now / green_period) & 1U) != 0U));
+    if (fault) {
+        const bool on = ((now / 125U) & 1U) != 0U;
+        board::target::set_red_led(on);
+        board::target::set_green_led(on);
+        return;
+    }
+
+    if (!playing) {
+        const bool on = ((now / 500U) & 1U) != 0U;
+        board::target::set_red_led(on);
+        board::target::set_green_led(on);
+        return;
+    }
+
+    // As-built front-panel meaning while output is enabled: green is the
+    // 44.1-kHz family and red is the 48-kHz family.
+    const bool family_48k = r.clocks.selected() == audio::ClockFamily::Family48k;
+    board::target::set_red_led(family_48k);
+    board::target::set_green_led(!family_48k);
 }
 
 std::uint16_t narrow_counter(std::uint32_t value) {
@@ -217,6 +233,9 @@ int main() {
     board::target::initialize_early_safe();
     board::target::initialize_digital();
     board::target::initialize_dac_bus();
+    // The working prototype enables the external analog DC/DC through its
+    // package-pin-60 bodge (GPIO_AD_00/GPIO1_IO14), not the schematic pin.
+    board::target::set_dcdc_enabled(true);
 
     // Runtime contains the 8 KiB audio ring. Static storage keeps it out of
     // the configured 8 KiB main/interrupt stack; construction still occurs
@@ -245,6 +264,11 @@ int main() {
         case usb::Event::Mounted: runtime.mounted = true; runtime.suspended = false; break;
         case usb::Event::Start:
             runtime.stream_requested = true;
+            // Re-resolve the stream format from the clock rate most recently
+            // selected by the host. This also handles hosts that send SET_CUR
+            // before changing the streaming alternate setting.
+            runtime.desired = audio::find_format(runtime.usb.requested_rate());
+            if (!runtime.desired) { safe_stop(runtime, true, StopReason::UnsupportedRate); break; }
             runtime.usb.start_feedback();
             begin_start(runtime, now);
             break;
@@ -276,6 +300,31 @@ int main() {
         case usb::Event::EventTrace:
             runtime.usb.send_event_trace();
             break;
+        case usb::Event::DmaDiagnostics: {
+            if (runtime.engine.running()) runtime.engine.capture_dma_diagnostics(now);
+            const auto& source = runtime.engine.dma_diagnostics();
+            usb::maintenance::DmaDiagnosticReport report{};
+            report.captured_ms = source.captured_ms;
+            report.dmamux_chcfg = source.dmamux_chcfg;
+            report.dma_es = source.dma_es;
+            report.tcd_saddr = source.tcd_saddr;
+            report.tcd_daddr = source.tcd_daddr;
+            report.tcd_nbytes = source.tcd_nbytes;
+            report.sai_tcsr = source.sai_tcsr;
+            report.sai_tcr1 = source.sai_tcr1;
+            report.sai_tcr2 = source.sai_tcr2;
+            report.sai_tcr3 = source.sai_tcr3;
+            report.sai_tfr0 = source.sai_tfr0;
+            report.dma_erq = source.dma_erq;
+            report.dma_int = source.dma_int;
+            report.dma_hrs = source.dma_hrs;
+            report.tcd_citer = source.tcd_citer;
+            report.tcd_biter = source.tcd_biter;
+            report.tcd_csr = source.tcd_csr;
+            runtime.usb.update_dma_diagnostics(report);
+            runtime.usb.send_dma_diagnostics();
+            break;
+        }
         case usb::Event::BootloaderArm:
             if (runtime.bootloader_armed && !reached(now, runtime.bootloader_deadline)) {
                 safe_stop(runtime, false);

@@ -5,7 +5,7 @@ measured. “Unknown” is deliberate; it must not be filled from inference.
 
 | Signal | Working firmware | Schematic | Measured/as-built | Safe/reset behavior |
 |---|---|---|---|---|
-| `!DCDC_EN` | GPIO_AD_00 / GPIO1_IO14 | GPIO_AD_03 / GPIO1_IO17 | Unknown | Legacy starts low, later high |
+| `!DCDC_EN` | GPIO_AD_00 / GPIO1_IO14 | GPIO_AD_03 / GPIO1_IO17 | Package pin 60 bodge | Low during early boot, then high enables DC/DC |
 | `DCDC_CLK` | Pad muxed as GPIO_AD_04 / GPIO1_IO18, no validated clock | GPIO_AD_04 / GPT2_COMPARE1 | Unknown | Unknown |
 | `D_MCK` monitor | Not implemented | GPIO_AD_05 / GPT2_CAPTURE1 | Unknown | Input; keep disabled |
 | `LED_G_ST` | GPIO_00 / GPIO1_IO00, unused | Same | Unknown | Low |

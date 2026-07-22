@@ -38,6 +38,8 @@ void UsbDevice::task() noexcept {
         tud_hid_report(0U, &diagnostics_, sizeof(diagnostics_))) pending_report_ = PendingReport::None;
     else if (pending_report_ == PendingReport::EventTrace &&
              tud_hid_report(0U, &event_trace_, sizeof(event_trace_))) pending_report_ = PendingReport::None;
+    else if (pending_report_ == PendingReport::DmaDiagnostics &&
+             tud_hid_report(0U, &dma_diagnostics_, sizeof(dma_diagnostics_))) pending_report_ = PendingReport::None;
 }
 EventRecord UsbDevice::take_event() noexcept {
     if (event_count_ == 0U) return {};
@@ -48,7 +50,8 @@ EventRecord UsbDevice::take_event() noexcept {
 }
 bool UsbDevice::post_event(EventRecord event) noexcept {
     event.reserved = static_cast<std::uint16_t>(board::MonotonicTimer::now_ms());
-    if (event.event != Event::Diagnostics && event.event != Event::EventTrace) {
+    if (event.event != Event::Diagnostics && event.event != Event::EventTrace &&
+        event.event != Event::DmaDiagnostics) {
         event_history_[event_history_write_] = event;
         event_history_write_ = static_cast<std::uint8_t>((event_history_write_ + 1U) % event_history_.size());
         if (event_history_count_ < event_history_.size()) ++event_history_count_;
@@ -95,6 +98,22 @@ bool UsbDevice::send_event_trace() noexcept {
     pending_report_ = PendingReport::EventTrace;
     return false;
 }
+void UsbDevice::update_dma_diagnostics(const maintenance::DmaDiagnosticReport& report) noexcept {
+    const std::uint16_t next_sequence = static_cast<std::uint16_t>(dma_diagnostics_.sequence + 1U);
+    dma_diagnostics_ = report;
+    dma_diagnostics_.magic = maintenance::dma_diagnostic_magic;
+    dma_diagnostics_.version = 1U;
+    dma_diagnostics_.size = static_cast<std::uint8_t>(sizeof(dma_diagnostics_));
+    dma_diagnostics_.sequence = next_sequence;
+}
+bool UsbDevice::send_dma_diagnostics() noexcept {
+    if (tud_hid_ready() && tud_hid_report(0U, &dma_diagnostics_, sizeof(dma_diagnostics_))) {
+        pending_report_ = PendingReport::None;
+        return true;
+    }
+    pending_report_ = PendingReport::DmaDiagnostics;
+    return false;
+}
 } // namespace usb
 
 extern "C" void USB_OTG1_IRQHandler() { tusb_int_handler(0U, true); }
@@ -103,7 +122,10 @@ extern "C" void tud_umount_cb() { if (instance) instance->post_event(usb::Event:
 extern "C" void tud_suspend_cb(bool) { if (instance) instance->post_event(usb::Event::Suspended); }
 extern "C" void tud_resume_cb() { if (instance) instance->post_event(usb::Event::Resumed); }
 
-extern "C" bool tud_audio_rx_done_post_read_cb(std::uint8_t, std::uint16_t received, std::uint8_t, std::uint8_t, std::uint8_t) {
+// TinyUSB 0.21 invokes this after placing the completed OUT packet in its
+// software FIFO and before scheduling the next receive. Read the packet here
+// so the FIFO cannot fill and block the isochronous endpoint.
+extern "C" bool tud_audio_rx_done_isr(std::uint8_t, std::uint16_t received, std::uint8_t, std::uint8_t, std::uint8_t) {
     if (!instance || !stream_buffer) return false;
     if (received > sizeof(packet)) { ++instance->dropped_packets_; return false; }
     const std::uint16_t count = tud_audio_read(packet, received);
@@ -135,42 +157,44 @@ extern "C" bool tud_audio_set_itf_cb(std::uint8_t, tusb_control_request_t const*
                           usb::Control::InterfaceAlternate, 0U, alt});
     return alt <= 1U;
 }
-extern "C" bool tud_audio_set_itf_close_EP_cb(std::uint8_t, tusb_control_request_t const*) {
+extern "C" bool tud_audio_set_itf_close_ep_cb(std::uint8_t, tusb_control_request_t const*) {
     if (instance) instance->post_event({usb::Event::Stop, usb::Control::InterfaceAlternate, 0U, 0U});
     return true;
 }
 
 extern "C" bool tud_audio_get_req_entity_cb(std::uint8_t rhport, tusb_control_request_t const* raw) {
     if (!instance) return false;
-    auto const* request = reinterpret_cast<audio_control_request_t const*>(raw);
-    if (request->bEntityID == UAC2_ENTITY_FEATURE_UNIT && request->bChannelNumber > 2U) return false;
-    if (request->bEntityID == UAC2_ENTITY_CLOCK && request->bControlSelector == AUDIO_CS_CTRL_SAM_FREQ) {
-        if (request->bRequest == AUDIO_CS_REQ_CUR) {
-            audio_control_cur_4_t value{static_cast<std::int32_t>(instance->requested_rate())};
+    const std::uint8_t entity = tu_u16_high(tu_le16toh(raw->wIndex));
+    const std::uint8_t channel = tu_u16_low(tu_le16toh(raw->wValue));
+    const std::uint8_t selector = tu_u16_high(tu_le16toh(raw->wValue));
+    if (entity == UAC2_ENTITY_FEATURE_UNIT && channel > 2U) return false;
+    if (entity == UAC2_ENTITY_CLOCK && selector == AUDIO20_CS_CTRL_SAM_FREQ) {
+        if (raw->bRequest == AUDIO20_CS_REQ_CUR) {
+            audio20_control_cur_4_t value{static_cast<std::int32_t>(instance->requested_rate())};
             return tud_audio_buffer_and_schedule_control_xfer(rhport, raw, &value, sizeof(value));
         }
-        if (request->bRequest == AUDIO_CS_REQ_RANGE) {
+        if (raw->bRequest == AUDIO20_CS_REQ_RANGE) {
             const auto rate0 = static_cast<std::int32_t>(audio::supported_format(0U).format.sample_rate_hz);
             const auto rate1 = static_cast<std::int32_t>(audio::supported_format(1U).format.sample_rate_hz);
-            audio_control_range_4_n_t(2) ranges{2U, {{rate0, rate0, 0}, {rate1, rate1, 0}}};
+            audio20_control_range_4_n_t(2) ranges{2U, {{rate0, rate0, 0}, {rate1, rate1, 0}}};
             return tud_audio_buffer_and_schedule_control_xfer(rhport, raw, &ranges, sizeof(ranges));
         }
     }
-    if (request->bEntityID == UAC2_ENTITY_CLOCK && request->bControlSelector == AUDIO_CS_CTRL_CLK_VALID && request->bRequest == AUDIO_CS_REQ_CUR) {
-        audio_control_cur_1_t valid{static_cast<std::int8_t>(instance->clock_valid_ ? 1 : 0)};
+    if (entity == UAC2_ENTITY_CLOCK && selector == AUDIO20_CS_CTRL_CLK_VALID && raw->bRequest == AUDIO20_CS_REQ_CUR) {
+        audio20_control_cur_1_t valid{static_cast<std::int8_t>(instance->clock_valid_ ? 1 : 0)};
         return tud_audio_buffer_and_schedule_control_xfer(rhport, raw, &valid, sizeof(valid));
     }
-    if (request->bEntityID == UAC2_ENTITY_FEATURE_UNIT && request->bControlSelector == AUDIO_FU_CTRL_MUTE && request->bRequest == AUDIO_CS_REQ_CUR) {
-        audio_control_cur_1_t mute{static_cast<std::int8_t>(instance->controls_.muted ? 1 : 0)};
+    if (entity == UAC2_ENTITY_FEATURE_UNIT && selector == AUDIO20_FU_CTRL_MUTE && raw->bRequest == AUDIO20_CS_REQ_CUR) {
+        audio20_control_cur_1_t mute{static_cast<std::int8_t>(instance->controls_.muted ? 1 : 0)};
         return tud_audio_buffer_and_schedule_control_xfer(rhport, raw, &mute, sizeof(mute));
     }
-    if (request->bEntityID == UAC2_ENTITY_FEATURE_UNIT && request->bControlSelector == AUDIO_FU_CTRL_VOLUME) {
-        if (request->bRequest == AUDIO_CS_REQ_CUR) {
-            audio_control_cur_2_t volume{instance->controls_.volume_db_8_8};
+    if (entity == UAC2_ENTITY_FEATURE_UNIT && selector == AUDIO20_FU_CTRL_VOLUME) {
+        if (raw->bRequest == AUDIO20_CS_REQ_CUR) {
+            audio20_control_cur_2_t volume{instance->controls_.volume_db_8_8};
             return tud_audio_buffer_and_schedule_control_xfer(rhport, raw, &volume, sizeof(volume));
         }
-        if (request->bRequest == AUDIO_CS_REQ_RANGE) {
-            audio_control_range_2_n_t(1) range{1U, {{-0x7F00, 0, 0x0080}}};
+        if (raw->bRequest == AUDIO20_CS_REQ_RANGE) {
+            audio20_control_range_2_n_t(1) range{1U, {{-0x7F00, 0, 0x0080}}};
             return tud_audio_buffer_and_schedule_control_xfer(rhport, raw, &range, sizeof(range));
         }
     }
@@ -179,23 +203,26 @@ extern "C" bool tud_audio_get_req_entity_cb(std::uint8_t rhport, tusb_control_re
 
 extern "C" bool tud_audio_set_req_entity_cb(std::uint8_t, tusb_control_request_t const* raw, std::uint8_t* data) {
     if (!instance) return false;
-    auto const* request = reinterpret_cast<audio_control_request_t const*>(raw);
-    if (request->bEntityID == UAC2_ENTITY_FEATURE_UNIT && request->bChannelNumber > 2U) return false;
-    if (request->bEntityID == UAC2_ENTITY_CLOCK && request->bControlSelector == AUDIO_CS_CTRL_SAM_FREQ && request->wLength == 4U) {
-        const std::uint32_t rate = static_cast<std::uint32_t>(reinterpret_cast<audio_control_cur_4_t*>(data)->bCur);
+    const std::uint8_t entity = tu_u16_high(tu_le16toh(raw->wIndex));
+    const std::uint8_t channel = tu_u16_low(tu_le16toh(raw->wValue));
+    const std::uint8_t selector = tu_u16_high(tu_le16toh(raw->wValue));
+    const std::uint16_t length = tu_le16toh(raw->wLength);
+    if (entity == UAC2_ENTITY_FEATURE_UNIT && channel > 2U) return false;
+    if (entity == UAC2_ENTITY_CLOCK && selector == AUDIO20_CS_CTRL_SAM_FREQ && length == 4U) {
+        const std::uint32_t rate = static_cast<std::uint32_t>(reinterpret_cast<audio20_control_cur_4_t*>(data)->bCur);
         if (!audio::find_format(rate)) return false;
         instance->requested_rate_ = rate;
         instance->last_set_cur_rate_ = rate;
         instance->post_event({usb::Event::Rate, usb::Control::SampleRate, 0U, rate});
         return true;
     }
-    if (request->bEntityID == UAC2_ENTITY_FEATURE_UNIT && request->bControlSelector == AUDIO_FU_CTRL_MUTE && request->wLength == 1U) {
-        instance->controls_.muted = reinterpret_cast<audio_control_cur_1_t*>(data)->bCur != 0;
+    if (entity == UAC2_ENTITY_FEATURE_UNIT && selector == AUDIO20_FU_CTRL_MUTE && length == 1U) {
+        instance->controls_.muted = reinterpret_cast<audio20_control_cur_1_t*>(data)->bCur != 0;
         instance->post_event({usb::Event::Controls, usb::Control::Mute, 0U,
                               instance->controls_.muted ? 1U : 0U}); return true;
     }
-    if (request->bEntityID == UAC2_ENTITY_FEATURE_UNIT && request->bControlSelector == AUDIO_FU_CTRL_VOLUME && request->wLength == 2U) {
-        std::int16_t value = reinterpret_cast<audio_control_cur_2_t*>(data)->bCur;
+    if (entity == UAC2_ENTITY_FEATURE_UNIT && selector == AUDIO20_FU_CTRL_VOLUME && length == 2U) {
+        std::int16_t value = reinterpret_cast<audio20_control_cur_2_t*>(data)->bCur;
         if (value > 0) value = 0;
         if (value < -0x7F00) value = -0x7F00;
         instance->controls_.volume_db_8_8 = value;
@@ -220,4 +247,5 @@ extern "C" void tud_hid_set_report_cb(std::uint8_t, std::uint8_t,
     if (usb::maintenance::is_enter_rom(buffer, size)) instance->post_event(usb::Event::BootloaderArm);
     else if (usb::maintenance::is_get_diagnostics(buffer, size)) instance->post_event(usb::Event::Diagnostics);
     else if (usb::maintenance::is_get_events(buffer, size)) instance->post_event(usb::Event::EventTrace);
+    else if (usb::maintenance::is_get_dma_diagnostics(buffer, size)) instance->post_event(usb::Event::DmaDiagnostics);
 }

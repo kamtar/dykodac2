@@ -15,7 +15,7 @@ inline constexpr std::uint8_t write_command = 0x98U;
 
 enum class Control2 : std::uint8_t { LegacyBootstrap = 0x10U };
 enum class Control7 : std::uint8_t { LegacyBootstrap = 0xB0U };
-enum class MuteControl : std::uint8_t { BothChannels = 0xD8U };
+enum class MuteControl : std::uint8_t { BothChannelsMuted = 0xD8U, BothChannelsUnmuted = 0xC0U };
 enum class Control8 : std::uint8_t {
     MutedBootstrap = 0xC0U,
     RunningControlPort = 0x40U,

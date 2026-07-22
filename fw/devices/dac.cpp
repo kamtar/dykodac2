@@ -34,7 +34,9 @@ bool Cs4398::set_mute(bool muted) noexcept {
     if (state_ != State::ReadyMuted) return false;
     transport_.set_chip_select(true);
     const bool ok = transport_.transfer(write_command(dac_registers::Register::MuteControl,
-        muted ? 0xD8U : 0xD0U));
+        // Preserve PCM/DSD auto-mute (bits 7:6). MUTE_A and MUTE_B are bits
+        // 4 and 3 respectively: D8 mutes both; C0 unmutes both.
+        muted ? 0xD8U : 0xC0U));
     transport_.set_chip_select(false);
     if (!ok) { safe_fault(); return false; }
     muted_ = muted;

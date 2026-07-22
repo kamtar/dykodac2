@@ -49,4 +49,30 @@ struct DiagnosticReport {
 static_assert(sizeof(DiagnosticReport) == 64U, "maintenance report must fit one HID packet");
 static_assert(offsetof(DiagnosticReport, uptime_ms) == 8U, "diagnostic ABI changed");
 
+inline constexpr std::uint32_t dma_diagnostic_magic = 0x414D4444U; // "DDMA"
+struct DmaDiagnosticReport {
+    std::uint32_t magic{dma_diagnostic_magic};
+    std::uint8_t version{1U};
+    std::uint8_t size{64U};
+    std::uint16_t sequence{0U};
+    std::uint32_t captured_ms{0U};
+    std::uint32_t dmamux_chcfg{0U};
+    std::uint32_t dma_es{0U};
+    std::uint32_t tcd_saddr{0U};
+    std::uint32_t tcd_daddr{0U};
+    std::uint32_t tcd_nbytes{0U};
+    std::uint32_t sai_tcsr{0U};
+    std::uint32_t sai_tcr1{0U};
+    std::uint32_t sai_tcr2{0U};
+    std::uint32_t sai_tcr3{0U};
+    std::uint32_t sai_tfr0{0U};
+    std::uint16_t dma_erq{0U};
+    std::uint16_t dma_int{0U};
+    std::uint16_t dma_hrs{0U};
+    std::uint16_t tcd_citer{0U};
+    std::uint16_t tcd_biter{0U};
+    std::uint16_t tcd_csr{0U};
+};
+static_assert(sizeof(DmaDiagnosticReport) == 64U, "DMA diagnostic report must fit HID packet");
+
 } // namespace usb::maintenance

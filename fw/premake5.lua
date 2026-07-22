@@ -74,6 +74,10 @@ project "dykodac2_fw"
         "__MCUXPRESSO",
         "__USE_CMSIS",
         "SDK_OS_BAREMETAL",
+        -- SDK 25.x renamed the fixed SAI FIFO feature to the instance form
+        -- FSL_FEATURE_SAI_FIFO_COUNTn(x), while its bundled SAI driver still
+        -- consumes the legacy name.
+        "FSL_FEATURE_SAI_FIFO_COUNT=32",
         "CFG_TUSB_CONFIG_FILE=\"usb/tusb_config.h\"",
     }
     buildoptions {

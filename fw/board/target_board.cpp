@@ -33,7 +33,10 @@ void initialize_early_safe() noexcept {
     output(IOMUXC_GPIO_03_GPIOMUX_IO03, 3U, config::board::relay_disconnected_level);
     output(IOMUXC_GPIO_13_GPIOMUX_IO13, 13U, config::board::dac_reset_asserted_level);
     output(IOMUXC_GPIO_12_GPIOMUX_IO12, 12U, !config::board::dac_chip_select_asserted_level);
-    output(IOMUXC_GPIO_AD_00_GPIOMUX_IO14, 14U, false);
+    // The assembled prototype reroutes !DCDC_EN to package pin 60. Keep it
+    // disabled through the clock transition; main enables it once all safe
+    // GPIO levels have been established.
+    output(IOMUXC_GPIO_AD_00_GPIOMUX_IO14, 14U, config::board::dcdc_disabled_level);
     // Complete indicator setup only after the clock routine has returned.
     output(IOMUXC_GPIO_00_GPIOMUX_IO00, 0U, false);
     output(IOMUXC_GPIO_01_GPIOMUX_IO01, 1U, false);
@@ -71,6 +74,9 @@ void set_dac_reset(bool asserted) noexcept {
 }
 void set_dac_chip_select(bool asserted) noexcept {
     write(12U, asserted ? config::board::dac_chip_select_asserted_level : !config::board::dac_chip_select_asserted_level);
+}
+void set_dcdc_enabled(bool enabled) noexcept {
+    write(14U, enabled ? config::board::dcdc_enabled_level : config::board::dcdc_disabled_level);
 }
 void select_clock_family(audio::ClockFamily family) noexcept {
     write(5U, family == audio::ClockFamily::Family48k ? config::board::oscillator_48k_level : config::board::oscillator_44k1_level);

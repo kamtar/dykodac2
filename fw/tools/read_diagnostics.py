@@ -14,9 +14,11 @@ VID = 0x1209
 PID = 0xD2A3
 COMMAND = b"DYKO-DIAG-GET-01"
 EVENT_COMMAND = b"DYKO-EVENT-GET-1"
+DMA_COMMAND = b"DYKO-DMA-GET-001"
 REPORT = struct.Struct("<IBBH9I5H10B")
 EVENT_HEADER = struct.Struct("<IBBBB")
 EVENT_RECORD = struct.Struct("<BBHI")
+DMA_REPORT = struct.Struct("<IBBH11I6H")
 
 APP_STATES = [
     "BootSafe", "Initializing", "IdleMuted", "PreparingStream", "Playing",
@@ -35,6 +37,7 @@ STOP_REASONS = [
 EVENTS = [
     "None", "Mounted", "Detached", "Suspended", "Resumed", "Start", "Stop",
     "Rate", "Controls", "Diagnostics", "EventTrace", "BootloaderArm",
+    "DmaDiagnostics",
 ]
 CONTROLS = ["None", "SampleRate", "Mute", "Volume", "InterfaceAlternate"]
 
@@ -61,6 +64,7 @@ try:
 
     raw = query(COMMAND)
     event_raw = query(EVENT_COMMAND)
+    dma_raw = query(DMA_COMMAND)
 finally:
     device.close()
 
@@ -145,5 +149,47 @@ for index in range(event_count):
         item["signed_value"] = value - 0x100000000
     recent_events.append(item)
 decoded["usb"]["recent_events_oldest_to_newest"] = recent_events
+
+(
+    dma_magic, dma_version, dma_size, dma_sequence, captured_ms,
+    dmamux_chcfg, dma_es, tcd_saddr, tcd_daddr, tcd_nbytes,
+    sai_tcsr, sai_tcr1, sai_tcr2, sai_tcr3, sai_tfr0,
+    dma_erq, dma_int, dma_hrs, tcd_citer, tcd_biter, tcd_csr,
+) = DMA_REPORT.unpack(dma_raw)
+if dma_magic != 0x414D4444 or dma_version != 1 or dma_size != DMA_REPORT.size:
+    sys.exit("Unrecognized DMA diagnostic report")
+
+citer = tcd_citer & 0x7FFF
+biter = tcd_biter & 0x7FFF
+source_ok = (dmamux_chcfg & 0x7F) == 20 and bool(dmamux_chcfg & 0x80000000)
+request_path_enabled = source_ok and bool(dma_erq & 1) and bool(sai_tcsr & 1) and bool(sai_tcr3 & 0x10000)
+if dma_es:
+    assessment = "eDMA_error"
+elif dma_int & 1 or (tcd_csr & 0x80):
+    assessment = "major_loop_completed_check_IRQ_path"
+elif biter and citer < biter:
+    assessment = "DMA_moved_data_then_stalled_check_SAI_clock_and_FIFO"
+elif request_path_enabled:
+    assessment = "request_path_enabled_but_no_minor_loop_service"
+else:
+    assessment = "DMA_request_path_not_fully_enabled"
+
+decoded["sai_edma"] = {
+    "sequence": dma_sequence,
+    "captured_ms": captured_ms,
+    "assessment": assessment,
+    "dmamux": {"chcfg0_hex": f"0x{dmamux_chcfg:08x}", "source": dmamux_chcfg & 0x7F,
+               "enabled": bool(dmamux_chcfg & 0x80000000), "trigger": bool(dmamux_chcfg & 0x40000000)},
+    "edma": {"es_hex": f"0x{dma_es:08x}", "erq0": bool(dma_erq & 1), "int0": bool(dma_int & 1),
+             "hardware_request0": bool(dma_hrs & 1), "saddr_hex": f"0x{tcd_saddr:08x}",
+             "daddr_hex": f"0x{tcd_daddr:08x}", "nbytes": tcd_nbytes,
+             "citer": citer, "biter": biter, "csr_hex": f"0x{tcd_csr:04x}"},
+    "sai": {"tcsr_hex": f"0x{sai_tcsr:08x}", "frde": bool(sai_tcsr & 1),
+            "fifo_request": bool(sai_tcsr & 0x10000), "fifo_warning": bool(sai_tcsr & 0x20000),
+            "fifo_error": bool(sai_tcsr & 0x40000), "bclk_enabled": bool(sai_tcsr & 0x10000000),
+            "tx_enabled": bool(sai_tcsr & 0x80000000), "watermark": sai_tcr1 & 0x1F,
+            "tcr2_hex": f"0x{sai_tcr2:08x}", "channel0_enabled": bool(sai_tcr3 & 0x10000),
+            "fifo_read_pointer": sai_tfr0 & 0x3F, "fifo_write_pointer": (sai_tfr0 >> 16) & 0x3F},
+}
 
 print(json.dumps(decoded, indent=2))

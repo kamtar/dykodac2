@@ -63,6 +63,16 @@ fetches a second report containing the seven most recent USB events in oldest-to
 newest order, including each control or alternate-setting payload and the low
 16 bits of its monotonic millisecond timestamp.
 
+The reader also requests `DYKO-DMA-GET-001`, a separate 64-byte SAI/eDMA
+snapshot. On `DmaNoProgress` the firmware latches this snapshot before stopping
+SAI or disabling DMAMUX, preserving CHCFG0, eDMA error/request/interrupt state,
+the live TCD addresses and iteration counters, and the SAI control/FIFO pointers.
+For a continuously refreshed compact view, run:
+
+```powershell
+py tools/watch_dma_diagnostics.py
+```
+
 ## Indicators
 
 - Before enumeration: green toggles every 125 ms; red is off for the default
