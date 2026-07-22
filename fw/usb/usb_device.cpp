@@ -244,7 +244,8 @@ extern "C" std::uint16_t tud_hid_get_report_cb(std::uint8_t, std::uint8_t,
 extern "C" void tud_hid_set_report_cb(std::uint8_t, std::uint8_t,
     hid_report_type_t type, std::uint8_t const* buffer, std::uint16_t size) {
     if (!instance || type != HID_REPORT_TYPE_OUTPUT) return;
-    if (usb::maintenance::is_enter_rom(buffer, size)) instance->post_event(usb::Event::BootloaderArm);
+    if (usb::maintenance::is_enter_updater(buffer, size)) instance->post_event(usb::Event::UpdaterArm);
+    else if (usb::maintenance::is_enter_rom(buffer, size)) instance->post_event(usb::Event::BootloaderArm);
     else if (usb::maintenance::is_get_diagnostics(buffer, size)) instance->post_event(usb::Event::Diagnostics);
     else if (usb::maintenance::is_get_events(buffer, size)) instance->post_event(usb::Event::EventTrace);
     else if (usb::maintenance::is_get_dma_diagnostics(buffer, size)) instance->post_event(usb::Event::DmaDiagnostics);

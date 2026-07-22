@@ -9,6 +9,9 @@ extern "C" {
 
 namespace board::target {
 namespace {
+constexpr std::uint32_t red_led_pin = 0U;
+constexpr std::uint32_t green_led_pin = 1U;
+
 void output(std::uint32_t mux_register, std::uint32_t mux_mode,
             std::uint32_t input_register, std::uint32_t input_daisy,
             std::uint32_t config_register, std::uint32_t pin, bool level) noexcept {
@@ -82,6 +85,6 @@ void select_clock_family(audio::ClockFamily family) noexcept {
     write(5U, family == audio::ClockFamily::Family48k ? config::board::oscillator_48k_level : config::board::oscillator_44k1_level);
 }
 bool clock_select_level() noexcept { return GPIO_ReadPinInput(GPIO1, 5U) != 0U; }
-void set_red_led(bool on) noexcept { write(1U, on); }
-void set_green_led(bool on) noexcept { write(0U, on); }
+void set_red_led(bool on) noexcept { write(red_led_pin, on); }
+void set_green_led(bool on) noexcept { write(green_led_pin, on); }
 } // namespace board::target

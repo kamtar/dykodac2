@@ -76,7 +76,7 @@
 #define BOARD_USER_BUTTON_NAME        "SW4"
 
 /*! @brief The flash size */
-#define BOARD_FLASH_SIZE (0x1000000U)
+#define BOARD_FLASH_SIZE (0x100000U)
 
 /* USB PHY condfiguration */
 #define BOARD_USB_PHY_D_CAL     (0x0CU)

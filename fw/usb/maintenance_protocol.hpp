@@ -8,6 +8,9 @@ namespace usb::maintenance {
 inline constexpr std::array<std::uint8_t, 16> enter_rom{{
     'D','Y','K','O','-','R','O','M','-','B','O','O','T','-','0','1'
 }};
+inline constexpr std::array<std::uint8_t, 16> enter_updater{{
+    'D','Y','K','O','-','F','W','-','U','P','D','A','T','E','0','1'
+}};
 inline constexpr std::array<std::uint8_t, 16> get_diagnostics{{
     'D','Y','K','O','-','D','I','A','G','-','G','E','T','-','0','1'
 }};
@@ -28,6 +31,9 @@ inline bool is_command(const std::uint8_t* data, std::size_t size,
 }
 inline bool is_enter_rom(const std::uint8_t* data, std::size_t size) noexcept {
     return is_command(data, size, enter_rom);
+}
+inline bool is_enter_updater(const std::uint8_t* data, std::size_t size) noexcept {
+    return is_command(data, size, enter_updater);
 }
 inline bool is_get_diagnostics(const std::uint8_t* data, std::size_t size) noexcept {
     return is_command(data, size, get_diagnostics);

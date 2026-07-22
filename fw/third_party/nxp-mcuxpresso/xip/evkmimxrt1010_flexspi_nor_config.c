@@ -32,7 +32,7 @@ const flexspi_nor_config_t qspiflash_config = {
             .csSetupTime      = 3u,
             .sflashPadType    = kSerialFlash_4Pads,
             .serialClkFreq    = kFlexSpiSerialClk_100MHz,
-            .sflashA1Size     = 16u * 1024u * 1024u,
+            .sflashA1Size     = 1u * 1024u * 1024u,
             .lookupTable =
                 {
                     // Read LUTs

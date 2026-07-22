@@ -8,8 +8,8 @@ measured. “Unknown” is deliberate; it must not be filled from inference.
 | `!DCDC_EN` | GPIO_AD_00 / GPIO1_IO14 | GPIO_AD_03 / GPIO1_IO17 | Package pin 60 bodge | Low during early boot, then high enables DC/DC |
 | `DCDC_CLK` | Pad muxed as GPIO_AD_04 / GPIO1_IO18, no validated clock | GPIO_AD_04 / GPT2_COMPARE1 | Unknown | Unknown |
 | `D_MCK` monitor | Not implemented | GPIO_AD_05 / GPT2_CAPTURE1 | Unknown | Input; keep disabled |
-| `LED_G_ST` | GPIO_00 / GPIO1_IO00, unused | Same | Unknown | Low |
-| `LED_R_ERR` | GPIO_01 / GPIO1_IO01, loop-counter blink | Same | Unknown | Low |
+| `LED_G_ST` | GPIO_01 / GPIO1_IO01 | GPIO_00 / GPIO1_IO00 | Swapped on assembled board | Low |
+| `LED_R_ERR` | GPIO_00 / GPIO1_IO00 | GPIO_01 / GPIO1_IO01 | Swapped on assembled board | Low |
 | `OPTO_RELAY_JACK` | GPIO_03 / GPIO1_IO03 | Same | Unknown | Low at boot; high before USB; polarity needs measurement |
 | `D_OSC_SELECT` | GPIO_05 / GPIO1_IO05 | Same | Unknown | Low used for 44.1-kHz family |
 | `D_I2S_DATA` | GPIO_04 / SAI1_TX_DATA00 | Same | Unknown | Peripheral output |
@@ -43,7 +43,7 @@ The Debug FlexSPI NOR image with SHA-256
 `432AE83F08FF63C79F65666CED79044FDB6440EF21C851A65D4527900BF1C412` boots when
 programmed at offset zero using MCU Boot Utility. Red and green LEDs alternate
 once per second. Full GPIO initialization before `BOARD_InitBootClocks()` was
-observed to stall clock setup; only GPIO_01/red may be initialized before it
+observed to stall clock setup; only GPIO_01 (green on the assembled board) may be initialized before it
 until the responsible signal is isolated. Preserve `__MCUXPRESSO` for VTOR.
 
 ## Verified DAC SPI and SAI measurements (2026-07-19)

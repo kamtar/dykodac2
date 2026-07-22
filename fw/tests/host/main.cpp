@@ -9,7 +9,10 @@
 #include "usb/usb_device.hpp"
 #include "usb/maintenance_protocol.hpp"
 #include "usb/diagnostic_report.hpp"
+#include "platform/nxp/sha256.hpp"
+#include "platform/nxp/update_layout.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <vector>
@@ -37,12 +40,23 @@ struct MockDacTransport final : devices::DacTransport {
 }
 
 int main() {
+    platform::nxp::crypto::Sha256 sha;
+    sha.update("abc", 3U);
+    std::uint8_t sha_result[32]{};
+    sha.finish(sha_result);
+    constexpr std::uint8_t sha_abc[32]{
+        0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,0x41,0x41,0x40,0xde,0x5d,0xae,0x22,0x23,
+        0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad};
+    check(std::equal(std::begin(sha_result), std::end(sha_result), std::begin(sha_abc)), "SHA-256 known vector");
+    check(platform::nxp::update::crc32("123456789", 9U) == 0xCBF43926U, "CRC-32 known vector");
     check(usb::maintenance::is_enter_rom(usb::maintenance::enter_rom.data(),
           usb::maintenance::enter_rom.size()), "ROM command magic accepted");
     auto wrong_rom_command = usb::maintenance::enter_rom;
     wrong_rom_command[0] ^= 1U;
     check(!usb::maintenance::is_enter_rom(wrong_rom_command.data(), wrong_rom_command.size()),
           "near-match ROM command rejected");
+    check(usb::maintenance::is_enter_updater(usb::maintenance::enter_updater.data(),
+          usb::maintenance::enter_updater.size()), "firmware updater command accepted");
     std::array<std::uint8_t, 64> padded_diagnostic_command{};
     for (std::size_t i = 0; i < usb::maintenance::get_diagnostics.size(); ++i)
         padded_diagnostic_command[i] = usb::maintenance::get_diagnostics[i];

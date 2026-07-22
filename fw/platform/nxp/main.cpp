@@ -12,6 +12,7 @@
 #include "platform/nxp/flexio_dac_transport.hpp"
 #include "platform/nxp/mpu_config.hpp"
 #include "platform/nxp/rom_bootloader.hpp"
+#include "platform/nxp/boot_control.hpp"
 #include "usb/usb_device.hpp"
 
 #include <new>
@@ -50,6 +51,8 @@ struct Runtime {
     bool stream_requested{false};
     bool bootloader_armed{false};
     std::uint32_t bootloader_deadline{0U};
+    bool updater_armed{false};
+    std::uint32_t updater_deadline{0U};
     StartStep last_stop_step{StartStep::None};
     StopReason stop_reason{StopReason::None};
 };
@@ -245,6 +248,7 @@ int main() {
     runtime.relay.initialize_safe();
     runtime.clocks.initialize_safe();
     if (!board::MonotonicTimer::initialize(SystemCoreClock)) for (;;) __asm volatile("wfi");
+    const bool trial_boot = platform::nxp::boot_control::trial_boot();
     runtime.app.dispatch(app::Event::Initialize);
     runtime.dac.begin(board::MonotonicTimer::now_ms());
 
@@ -335,10 +339,21 @@ int main() {
             runtime.bootloader_armed = true;
             runtime.bootloader_deadline = now + 2'000U;
             break;
+        case usb::Event::UpdaterArm:
+            if (runtime.updater_armed && !reached(now, runtime.updater_deadline)) {
+                safe_stop(runtime, false);
+                runtime.relay.disconnect();
+                board::target::set_dac_reset(true);
+                platform::nxp::boot_control::request_updater();
+            }
+            runtime.updater_armed = true;
+            runtime.updater_deadline = now + 2'000U;
+            break;
         default: break;
         }
         run_start(runtime, now);
         if (runtime.bootloader_armed && reached(now, runtime.bootloader_deadline)) runtime.bootloader_armed = false;
+        if (runtime.updater_armed && reached(now, runtime.updater_deadline)) runtime.updater_armed = false;
         if (runtime.app.state() != app::State::FaultMuted && runtime.engine.dma_errors() != 0U)
             safe_stop(runtime, true, StopReason::DmaError);
         else if (runtime.app.state() != app::State::FaultMuted &&
@@ -346,6 +361,11 @@ int main() {
             safe_stop(runtime, true, StopReason::Underrun);
         update_leds(runtime, now);
         refresh_diagnostics(runtime, now);
+        if (trial_boot) {
+            platform::nxp::boot_control::watchdog_refresh();
+            platform::nxp::boot_control::poll_trial_health(now,
+                runtime.usb_ready && runtime.dac.ready_muted() && runtime.app.state() != app::State::FaultMuted);
+        }
         __asm volatile("wfi");
     }
 }

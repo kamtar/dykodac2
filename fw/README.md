@@ -17,15 +17,16 @@ mingw32-make -C build/gmake2 dykodac2_host_tests config=hosttest
 build/gmake2/bin/HostTest/dykodac2_host_tests.exe
 ```
 
-## Build the RT1011 USB DAC image
+## Build the RT1011 USB DAC and A/B updater
 
 ```powershell
-premake5 gmake2
-$env:CC='arm-none-eabi-gcc'
-$env:CXX='arm-none-eabi-g++'
-$env:AR='arm-none-eabi-ar'
-mingw32-make -C build/gmake2 dykodac2_fw config=debug
+tools/make_update.ps1 -Configuration Release -Version 1
 ```
+
+This produces `dykodac2_factory.bin` for the one-time layout migration and
+`dykodac2.dykoupd` for subsequent driverless HID updates. See
+[`docs/firmware-update.md`](docs/firmware-update.md) before programming the
+factory image; the first board test must confirm the exact NOR command set.
 
 This produces `.elf`, `.bin`, `.hex`, `.map`, and `.lst` files. The diagnostic
 image holds the relay open and analog power disabled, configures the CS4398 over

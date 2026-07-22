@@ -7,7 +7,7 @@
 #include <array>
 
 namespace usb {
-enum class Event : std::uint8_t { None, Mounted, Detached, Suspended, Resumed, Start, Stop, Rate, Controls, Diagnostics, EventTrace, BootloaderArm, DmaDiagnostics };
+enum class Event : std::uint8_t { None, Mounted, Detached, Suspended, Resumed, Start, Stop, Rate, Controls, Diagnostics, EventTrace, BootloaderArm, DmaDiagnostics, UpdaterArm };
 enum class Control : std::uint8_t { None, SampleRate, Mute, Volume, InterfaceAlternate };
 struct EventRecord {
     Event event{Event::None};
