@@ -24,8 +24,8 @@ struct Pin {
 namespace pins {
 inline constexpr Pin output_relay{"OPTO_RELAY_JACK", "GPIO_03", 10, "GPIO1_IO03", Direction::Output, false, InitPhase::EarlySafe, Owner::Relay, "Polarity provisional: legacy low at boot, high before USB"};
 inline constexpr Pin oscillator_select{"D_OSC_SELECT", "GPIO_05", 8, "GPIO1_IO05", Direction::Output, false, InitPhase::AudioClock, Owner::ClockManager, "Legacy low selects 22.5792 MHz; verify electrically"};
-inline constexpr Pin green_status_led{"LED_G_ST", "GPIO_00", 13, "GPIO1_IO00", Direction::Output, false, InitPhase::Digital, Owner::Indicators, "Schematic identity; unused by legacy application"};
-inline constexpr Pin red_error_led{"LED_R_ERR", "GPIO_01", 12, "GPIO1_IO01", Direction::Output, false, InitPhase::Digital, Owner::Indicators, "Legacy blink pin"};
+inline constexpr Pin green_status_led{"LED_G_ST", "GPIO_01", 12, "GPIO1_IO01", Direction::Output, false, InitPhase::Digital, Owner::Indicators, "blink pin"};
+inline constexpr Pin red_error_led{"LED_R_ERR", "GPIO_00", 13, "GPIO1_IO00", Direction::Output, false, InitPhase::Digital, Owner::Indicators, "blink pin"};
 inline constexpr Pin dac_reset{"D_DAC_RST", "GPIO_13", 79, "GPIO1_IO13", Direction::Output, false, InitPhase::EarlySafe, Owner::Dac, "Active low in legacy startup"};
 inline constexpr Pin dac_chip_select{"D_DAC_CS", "GPIO_12", 80, "GPIO1_IO12", Direction::Output, true, InitPhase::EarlySafe, Owner::Dac, "Active low"};
 inline constexpr Pin dac_spi_miso{"D_SPI_MISO", "GPIO_09", 3, "FLEXIO1_IO01", Direction::Peripheral, false, InitPhase::Digital, Owner::Dac, "Isolator may hold low and confuse ROM boot detection"};
