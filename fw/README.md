@@ -20,11 +20,25 @@ build/gmake2/bin/HostTest/dykodac2_host_tests.exe
 ## Build the RT1011 USB DAC and A/B updater
 
 ```powershell
-tools/make_update.ps1 -Configuration Release -Version 1
+build.bat 1
 ```
 
-This produces `dykodac2_factory.bin` for the one-time layout migration and
-`dykodac2.dykoupd` for subsequent driverless HID updates. See
+The optional argument is the packaged firmware version and defaults to `1`.
+The script builds all Release firmware targets, creates the factory and HID
+update packages, then builds and runs the host tests.
+
+For a clean build, remove only the generated `build/gmake2` tree and rebuild
+everything with:
+
+```powershell
+build.bat clean
+```
+
+An optional version may follow `clean`, for example `build.bat clean 5`.
+The archived known-good image under `build/recovery` is preserved.
+
+This produces `dykodac2_factory.elf` and `dykodac2_factory.bin` for the one-time
+layout migration and `dykodac2.dykoupd` for subsequent driverless HID updates. See
 [`docs/firmware-update.md`](docs/firmware-update.md) before programming the
 factory image; the first board test must confirm the exact NOR command set.
 

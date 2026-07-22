@@ -30,6 +30,7 @@ public:
     bool start(const FormatConfig& config, StreamBuffer& stream) noexcept;
     void stop() noexcept;
     void attach_stream(StreamBuffer& stream) noexcept { stream_ = &stream; }
+    void detach_stream() noexcept { stream_ = nullptr; }
     bool running() const noexcept { return running_; }
     std::uint32_t dma_completions() const noexcept { return dma_completions_; }
     std::uint32_t dma_errors() const noexcept { return dma_errors_; }

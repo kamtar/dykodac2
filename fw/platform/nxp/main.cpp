@@ -49,6 +49,7 @@ struct Runtime {
     bool mounted{false};
     bool suspended{false};
     bool stream_requested{false};
+    bool resume_pending{false};
     bool bootloader_armed{false};
     std::uint32_t bootloader_deadline{0U};
     bool updater_armed{false};
@@ -77,9 +78,23 @@ void safe_stop(Runtime& r, bool fault, StopReason reason = StopReason::None) {
     r.usb.reset_stream();
     r.clocks.invalidate();
     r.step = StartStep::None;
+    r.resume_pending = false;
     r.usb.set_clock_valid(false);
     r.app.dispatch(fault ? app::Event::Fault : app::Event::StopRequested);
     if (!fault) r.app.dispatch(app::Event::Stopped);
+}
+
+void enter_connected_idle(Runtime& r) {
+    // A normal host alt-0 transition is only a pause while USB remains
+    // mounted. Keep the already-settled analog path connected and feed the
+    // DAC digital zero so relay switching cannot expose channel DC offset.
+    r.engine.detach_stream();
+    r.stream.clear();
+    r.usb.reset_stream();
+    r.usb.set_clock_valid(true);
+    r.underrun_baseline = r.engine.underruns();
+    r.resume_pending = false;
+    r.stop_reason = StopReason::HostStop;
 }
 
 void begin_start(Runtime& r, std::uint32_t now) {
@@ -89,6 +104,7 @@ void begin_start(Runtime& r, std::uint32_t now) {
     r.stream.clear();
     r.usb.set_clock_valid(false);
     r.clocks.invalidate();
+    r.resume_pending = false;
     if (r.app.state() == app::State::FaultMuted) {
         r.app.dispatch(app::Event::ClearFault);
         r.app.dispatch(app::Event::StreamRequested);
@@ -169,18 +185,24 @@ void update_leds(Runtime& r, std::uint32_t now) {
         return;
     }
 
-    if (!playing) {
-        const bool on = ((now / 500U) & 1U) != 0U;
-        board::target::set_red_led(on);
-        board::target::set_green_led(on);
-        return;
-    }
-
-    // As-built front-panel meaning while output is enabled: green is the
-    // 44.1-kHz family and red is the 48-kHz family.
+    // As-built front-panel meaning: green is the 44.1-kHz family and red is
+    // the 48-kHz family. Only the LED for the physically selected oscillator
+    // is used, except that a fault flashes both LEDs.
     const bool family_48k = r.clocks.selected() == audio::ClockFamily::Family48k;
-    board::target::set_red_led(family_48k);
-    board::target::set_green_led(!family_48k);
+    bool on = true;
+    if (!r.mounted) {
+        // With no PC connected, give a short heartbeat once every five seconds.
+        on = (now % 5'000U) < 100U;
+    } else if (playing && !r.stream_requested) {
+        // The PC is connected and the analog path remains settled, but no
+        // stream is active. Blink more slowly than the cold/muted idle state.
+        on = ((now / 1'500U) & 1U) != 0U;
+    } else if (!playing) {
+        // Enumerated but idle: slowly blink the selected oscillator.
+        on = ((now / 500U) & 1U) != 0U;
+    }
+    board::target::set_red_led(on && family_48k);
+    board::target::set_green_led(on && !family_48k);
 }
 
 std::uint16_t narrow_counter(std::uint32_t value) {
@@ -274,14 +296,26 @@ int main() {
             runtime.desired = audio::find_format(runtime.usb.requested_rate());
             if (!runtime.desired) { safe_stop(runtime, true, StopReason::UnsupportedRate); break; }
             runtime.usb.start_feedback();
-            begin_start(runtime, now);
+            if (runtime.app.state() == app::State::Playing && runtime.engine.running() &&
+                runtime.relay.connected() && !runtime.dac.muted() && runtime.clocks.stable() &&
+                runtime.active == runtime.desired) {
+                // Resume the existing settled path. Continue sending zeroes
+                // until USB has refilled half the ring, then join the stream.
+                runtime.usb.set_clock_valid(true);
+                runtime.resume_pending = true;
+            } else {
+                begin_start(runtime, now);
+            }
             break;
         case usb::Event::Rate:
             runtime.desired = audio::find_format(usb_event.value);
             if (!runtime.desired) safe_stop(runtime, true, StopReason::UnsupportedRate);
             else {
                 runtime.feedback.reset(*runtime.desired, audio::StreamBuffer::capacity_bytes / 2U);
-                if (runtime.stream_requested) begin_start(runtime, now);
+                // Some hosts repeat SET_CUR while resuming the same format.
+                // Do not turn that harmless repeat into a relay cycle.
+                if (runtime.stream_requested && runtime.desired != runtime.active)
+                    begin_start(runtime, now);
             }
             break;
         case usb::Event::Controls:
@@ -293,7 +327,14 @@ int main() {
                 else if (runtime.stream_requested) begin_start(runtime, now);
             }
             break;
-        case usb::Event::Stop: runtime.stream_requested = false; safe_stop(runtime, false, StopReason::HostStop); break;
+        case usb::Event::Stop:
+            runtime.stream_requested = false;
+            if (runtime.mounted && runtime.app.state() == app::State::Playing &&
+                runtime.engine.running() && runtime.relay.connected() && !runtime.dac.muted())
+                enter_connected_idle(runtime);
+            else
+                safe_stop(runtime, false, StopReason::HostStop);
+            break;
         case usb::Event::Detached: runtime.mounted = false; runtime.suspended = false; runtime.stream_requested = false; safe_stop(runtime, false, StopReason::Detached); break;
         case usb::Event::Suspended: runtime.suspended = true; runtime.stream_requested = false; safe_stop(runtime, false, StopReason::Suspended); break;
         case usb::Event::Resumed: runtime.suspended = false; break;
@@ -350,6 +391,12 @@ int main() {
             runtime.updater_deadline = now + 2'000U;
             break;
         default: break;
+        }
+        if (runtime.resume_pending && runtime.stream_requested &&
+            runtime.stream.size() >= audio::StreamBuffer::capacity_bytes / 2U) {
+            runtime.engine.attach_stream(runtime.stream);
+            runtime.underrun_baseline = runtime.engine.underruns();
+            runtime.resume_pending = false;
         }
         run_start(runtime, now);
         if (runtime.bootloader_armed && reached(now, runtime.bootloader_deadline)) runtime.bootloader_armed = false;

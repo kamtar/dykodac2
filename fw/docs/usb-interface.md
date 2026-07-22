@@ -75,13 +75,12 @@ py tools/watch_dma_diagnostics.py
 
 ## Indicators
 
-- Before enumeration: green toggles every 125 ms; red is off for the default
-  44.1-kHz family.
-- Enumerated and idle: green toggles every 500 ms.
-- Playing: green is solid.
-- Suspended: green toggles every 2 seconds.
-- Healthy 44.1-kHz family: red off. Healthy 48-kHz family: red toggles every
-  500 ms. Fault: red toggles every 125 ms and overrides rate indication.
+- Before enumeration: the selected oscillator LED pulses for 100 ms every
+  5 seconds. The power-on default is the green 44.1-kHz-family LED.
+- Enumerated and idle: only the selected oscillator LED toggles every 500 ms.
+- Playing: the selected oscillator LED is solid (green for 44.1 kHz, red for
+  48 kHz).
+- Fault: both LEDs toggle every 125 ms and override oscillator indication.
 
 ## Expected hardware signals
 
