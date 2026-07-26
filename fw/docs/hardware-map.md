@@ -32,7 +32,7 @@ At 2 MHz FlexIO SPI, the prototype sends these three-byte writes after reset:
 4. `98 08 40`
 
 The redesign then writes `98 04 D8`: register 04h retains the default PCM/DSD
-auto-mute bits and explicitly sets both channel-mute bits. This safety write is
+auto-mute bits cleared and explicitly sets both channel-mute bits. This safety write is
 additional to, and deliberately does not alter, the known-working sequence.
 
 Register semantics still require confirmation against the exact DAC datasheet.

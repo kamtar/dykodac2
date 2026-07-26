@@ -37,7 +37,11 @@ channels. Callbacks never touch relay, oscillator, or DAC GPIO/SPI.
 - Rate change: the same complete stop/start sequence runs; repeated requests
   collapse to the latest supported rate. The relay stays open throughout.
 - Overflow drops the complete incoming packet and increments counters.
-  Underrun zero-fills; three underruns or any DMA error enter `FaultMuted`.
+  An underrun zero-fills and increments its counter. Underruns while no stream
+  is playing are ignored. During active playback, three underruns safely open
+  the relay, mute the DAC, refill the ring, and restart automatically; they do
+  not enter `FaultMuted`. DMA and other hardware failures still enter
+  `FaultMuted`.
 - Fault: relay remains open, DAC remains muted, and a fresh complete start is
   required before reconnecting the output.
 

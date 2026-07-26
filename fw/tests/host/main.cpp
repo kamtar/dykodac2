@@ -160,16 +160,19 @@ int main() {
     check(transport.writes[1].bytes == std::array<std::uint8_t, 3>{{0x98U, 0x02U, 0x10U}}, "DAC bootstrap write 2");
     check(transport.writes[2].bytes == std::array<std::uint8_t, 3>{{0x98U, 0x07U, 0xB0U}}, "DAC bootstrap write 3");
     check(transport.writes[3].bytes == std::array<std::uint8_t, 3>{{0x98U, 0x08U, 0x40U}}, "DAC bootstrap write 4");
-    check(transport.writes[4].bytes == std::array<std::uint8_t, 3>{{0x98U, 0x04U, 0xD8U}}, "DAC explicit safety mute");
+    check(transport.writes[4].bytes == std::array<std::uint8_t, 3>{{0x98U, 0x04U, 0x18U}},
+          "DAC explicit safety mute keeps automatic silence mute disabled");
     check(!transport.reset && !transport.chip_select, "DAC ready state remains reset-released and CS inactive");
     check(dac.configure_format(f441), "DAC format configuration");
     check(dac.set_attenuation(-256), "DAC volume update");
     check(transport.writes[6].bytes[1] == 0x05U && transport.writes[7].bytes[1] == 0x06U &&
           transport.writes[6].bytes[2] == transport.writes[7].bytes[2], "DAC volume updates both channels");
     check(dac.set_mute(false) && !dac.muted(), "DAC unmute command");
-    check(transport.writes.back().bytes == std::array<std::uint8_t, 3>{{0x98U, 0x04U, 0xC0U}},
-          "DAC unmute clears both channel mute bits");
+    check(transport.writes.back().bytes == std::array<std::uint8_t, 3>{{0x98U, 0x04U, 0x00U}},
+          "DAC unmute disables automatic and explicit mute");
     check(dac.set_mute(true) && dac.muted(), "DAC mute command");
+    check(transport.writes.back().bytes == std::array<std::uint8_t, 3>{{0x98U, 0x04U, 0x18U}},
+          "DAC explicit mute does not re-enable automatic silence mute");
 
     MockDacTransport wrap_transport;
     devices::Cs4398 wrap_dac(wrap_transport, {10U, 20U, 2U, 3U});
@@ -199,8 +202,11 @@ int main() {
     check(controller.outputs().relay_connected && !controller.outputs().dac_muted, "playing connects output");
     check(controller.dispatch(app::Event::Fault), "fault accepted");
     check(!controller.outputs().relay_connected && controller.outputs().dac_muted && !controller.outputs().audio_running, "fault is safe");
+    check(controller.dispatch(app::Event::ClearFault) &&
+          controller.state() == app::State::IdleMuted,
+          "host lifecycle can clear a latched stream fault");
     for (auto safety_event : {app::Event::Detach, app::Event::Suspend, app::Event::DmaFailure,
-                              app::Event::ClockFailure, app::Event::RepeatedUnderrun}) {
+                              app::Event::ClockFailure}) {
         app::AppController safety;
         safety.dispatch(app::Event::Initialize); safety.dispatch(app::Event::Initialized);
         safety.dispatch(app::Event::StreamRequested); safety.dispatch(app::Event::AudioStable);

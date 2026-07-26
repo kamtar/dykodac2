@@ -80,8 +80,16 @@ void safe_stop(Runtime& r, bool fault, StopReason reason = StopReason::None) {
     r.step = StartStep::None;
     r.resume_pending = false;
     r.usb.set_clock_valid(false);
-    r.app.dispatch(fault ? app::Event::Fault : app::Event::StopRequested);
-    if (!fault) r.app.dispatch(app::Event::Stopped);
+    if (fault) {
+        r.app.dispatch(app::Event::Fault);
+    } else {
+        // A host alt-0, suspend, or detach is also the recovery boundary for
+        // a latched transport/hardware fault. This lets a later complete start
+        // retry safely without requiring a cable replug.
+        if (r.app.state() == app::State::FaultMuted) r.app.dispatch(app::Event::ClearFault);
+        r.app.dispatch(app::Event::StopRequested);
+        r.app.dispatch(app::Event::Stopped);
+    }
 }
 
 void enter_connected_idle(Runtime& r) {
@@ -112,6 +120,15 @@ void begin_start(Runtime& r, std::uint32_t now) {
     else if (r.app.state() == app::State::IdleMuted) r.app.dispatch(app::Event::StreamRequested);
     r.step = StartStep::RelayRelease;
     r.deadline = now + config::board::relay_release_us / 1'000U;
+}
+
+void recover_from_underrun(Runtime& r, std::uint32_t now) {
+    // An underrun is a loss of host audio data, not a hardware failure. Record
+    // it, open the relay, mute, and run the normal prefill/stability sequence
+    // again while alt-1 remains selected.
+    r.last_stop_step = r.step;
+    r.stop_reason = StopReason::Underrun;
+    begin_start(r, now);
 }
 
 void run_start(Runtime& r, std::uint32_t now) {
@@ -154,7 +171,10 @@ void run_start(Runtime& r, std::uint32_t now) {
         }
         break;
     case StartStep::Stable:
-        if (r.engine.underruns() != r.underrun_baseline) { safe_stop(r, true, StopReason::Underrun); break; }
+        if (r.engine.underruns() != r.underrun_baseline) {
+            recover_from_underrun(r, now);
+            break;
+        }
         if (reached(now, r.deadline)) {
             if (r.usb.controls().muted) { safe_stop(r, false, StopReason::HostMuted); break; }
             if (!r.dac.set_mute(false)) { safe_stop(r, true, StopReason::DacUnmute); break; }
@@ -401,11 +421,16 @@ int main() {
         run_start(runtime, now);
         if (runtime.bootloader_armed && reached(now, runtime.bootloader_deadline)) runtime.bootloader_armed = false;
         if (runtime.updater_armed && reached(now, runtime.updater_deadline)) runtime.updater_armed = false;
-        if (runtime.app.state() != app::State::FaultMuted && runtime.engine.dma_errors() != 0U)
+        // Only live, host-requested playback may promote transport counters to
+        // a fault. A completion IRQ can race with alt-0/abort; its counters
+        // must not re-latch FaultMuted after the Stop event just recovered it.
+        if (runtime.stream_requested && runtime.engine.running() &&
+            runtime.app.state() != app::State::FaultMuted && runtime.engine.dma_errors() != 0U)
             safe_stop(runtime, true, StopReason::DmaError);
-        else if (runtime.app.state() != app::State::FaultMuted &&
+        else if (runtime.stream_requested && runtime.engine.running() &&
+                 runtime.app.state() == app::State::Playing &&
                  runtime.engine.underruns() > runtime.underrun_baseline + 2U)
-            safe_stop(runtime, true, StopReason::Underrun);
+            recover_from_underrun(runtime, now);
         update_leds(runtime, now);
         refresh_diagnostics(runtime, now);
         if (trial_boot) {

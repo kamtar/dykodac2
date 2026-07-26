@@ -4,7 +4,7 @@
 
 namespace app {
 enum class State : std::uint8_t { BootSafe, Initializing, IdleMuted, PreparingStream, Playing, SwitchingRate, Stopping, FaultMuted };
-enum class Event : std::uint8_t { Initialize, Initialized, StreamRequested, AudioStable, RateRequested, StopRequested, Stopped, Fault, ClearFault, Detach, Suspend, DmaFailure, ClockFailure, RepeatedUnderrun };
+enum class Event : std::uint8_t { Initialize, Initialized, StreamRequested, AudioStable, RateRequested, StopRequested, Stopped, Fault, ClearFault, Detach, Suspend, DmaFailure, ClockFailure };
 
 struct SafetyOutputs {
     bool relay_connected;

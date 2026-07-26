@@ -7,8 +7,10 @@ void AppController::enter_muted(State state) noexcept {
 }
 
 bool AppController::dispatch(Event event) noexcept {
-    if (event == Event::Fault || event == Event::DmaFailure || event == Event::ClockFailure ||
-        event == Event::RepeatedUnderrun) { enter_muted(State::FaultMuted); return true; }
+    if (event == Event::Fault || event == Event::DmaFailure || event == Event::ClockFailure) {
+        enter_muted(State::FaultMuted);
+        return true;
+    }
     if (event == Event::Detach || event == Event::Suspend) { enter_muted(State::IdleMuted); return true; }
     switch (state_) {
     case State::BootSafe:
