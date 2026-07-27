@@ -138,16 +138,18 @@ extern "C" bool tud_audio_rx_done_isr(std::uint8_t, std::uint16_t received, std:
     for (std::uint16_t i = 0U; i + 3U < count; i = static_cast<std::uint16_t>(i + 4U))
         if (packet[i] != 0U) ++instance->padding_errors_;
     if (count != received || !stream_buffer->push(packet, count)) { ++instance->dropped_packets_; }
+    // TinyUSB 0.21 has no feedback-complete application callback.  Update
+    // our asynchronous feedback loop here, after the packet is committed to
+    // the application ring, so the host tracks the actual DAC-side backlog.
+    // tud_audio_fb_set() only publishes the next feedback value; it does not
+    // start a USB transfer and is safe in this receive ISR.
+    if (feedback_controller)
+        tud_audio_fb_set(feedback_controller->update(stream_buffer->size()));
     return true;
 }
 extern "C" void tud_audio_feedback_params_cb(std::uint8_t, std::uint8_t, audio_feedback_params_t* params) {
     params->method = AUDIO_FEEDBACK_METHOD_DISABLED;
     params->sample_freq = instance ? instance->requested_rate() : 0U;
-}
-extern "C" void tud_audio_fb_done_cb(std::uint8_t) {
-    if (instance && feedback_controller && stream_buffer) {
-        tud_audio_fb_set(feedback_controller->update(stream_buffer->size()));
-    }
 }
 extern "C" bool tud_audio_set_itf_cb(std::uint8_t, tusb_control_request_t const* request) {
     if (!instance) return false;

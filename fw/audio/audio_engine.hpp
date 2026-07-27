@@ -40,12 +40,14 @@ public:
     void on_dma_complete(bool success) noexcept;
 private:
     bool submit_silence() noexcept;
+    void conceal_underrun(std::uint8_t* buffer, std::size_t received_bytes) noexcept;
     volatile std::uint32_t dma_completions_{0U};
     volatile std::uint32_t dma_errors_{0U};
     volatile std::uint32_t underruns_{0U};
     volatile bool running_{false};
     StreamBuffer* stream_{nullptr};
     std::size_t transfer_bytes_{0U};
+    bool concealment_active_{false};
     DmaDiagnosticSnapshot dma_diagnostics_{};
 };
 } // namespace audio

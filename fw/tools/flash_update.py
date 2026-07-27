@@ -78,7 +78,13 @@ class Updater:
         check = bytearray(raw); struct.pack_into("<I", check, 60, 0)
         if magic != MAGIC or reply_cmd != command or seq != self.sequence or zlib.crc32(check[:60]) & 0xFFFFFFFF != crc:
             raise RuntimeError("invalid updater reply")
-        if status != 0: raise RuntimeError(f"updater error {status}, accepted offset {next_offset}")
+        if status != 0:
+            ip_status = struct.unpack_from("<I", payload, 12)[0]
+            ip_error = struct.unpack_from("<I", payload, 28)[0]
+            flash_status, failure = payload[40], payload[41]
+            raise RuntimeError(f"updater error {status}, accepted offset {next_offset}; "
+                               f"FlexSPI INTR=0x{ip_status:08X} STS1=0x{ip_error:08X} "
+                               f"flash-status=0x{flash_status:02X} failure-stage={failure}")
         return next_offset, payload
 
 
@@ -105,6 +111,11 @@ def main():
         if active not in (0, 1): raise RuntimeError(f"invalid active slot {active}")
         jedec = struct.unpack_from("<I", info, 8)[0] & 0xFFFFFF
         print(f"Updater JEDEC ID: {jedec:06X}")
+        ip_status, mcr0, flash_size, flash_config, ip_error, lut0, lut1 = struct.unpack_from("<IIIIIII", info, 12)
+        flash_status, failure = info[40], info[41]
+        print(f"FlexSPI: INTR=0x{ip_status:08X} MCR0=0x{mcr0:08X} "
+              f"FLSHCR0=0x{flash_size:08X} FLSHCR2=0x{flash_config:08X} STS1=0x{ip_error:08X} "
+              f"LUT13=[0x{lut0:08X},0x{lut1:08X}] flash-status=0x{flash_status:02X} failure-stage={failure}")
         target = 1 - active; image = images[target]
         print(f"Updating slot {'AB'[target]} to version {version} ({len(image)} bytes)")
         updater.command(2, data=struct.pack("<I", len(image)), timeout=60000)

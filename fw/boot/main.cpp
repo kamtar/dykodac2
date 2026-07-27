@@ -110,6 +110,14 @@ void choose_image(){
 void reply(boot::protocol::Command command,std::uint8_t sequence,boot::protocol::Status status,std::uint32_t offset=0U){
     response={};response.magic=boot::protocol::magic;response.command=static_cast<std::uint8_t>(command);response.sequence=sequence;response.status=static_cast<std::uint8_t>(status);response.offset=offset;
     response.data[0]=state.active_slot;response.data[1]=state.pending_slot;response.data[2]=state.trial_attempts;response.data[3]=receive_slot;
+    const auto ip_status=boot::flash::last_ip_status();std::memcpy(response.data+12,&ip_status,4);
+    const auto mcr0=FLEXSPI->MCR0;std::memcpy(response.data+16,&mcr0,4);
+    const auto flash_size=FLEXSPI->FLSHCR0[0];std::memcpy(response.data+20,&flash_size,4);
+    const auto flash_config=FLEXSPI->FLSHCR2[0];std::memcpy(response.data+24,&flash_config,4);
+    const auto ip_error=boot::flash::last_ip_error();std::memcpy(response.data+28,&ip_error,4);
+    const auto lut_jecec_0=FLEXSPI->LUT[52U];std::memcpy(response.data+32,&lut_jecec_0,4);
+    const auto lut_jecec_1=FLEXSPI->LUT[53U];std::memcpy(response.data+36,&lut_jecec_1,4);
+    response.data[40]=boot::flash::last_status_register();response.data[41]=boot::flash::last_failure();
     std::memcpy(response.data+4,&receive_size,4);const auto id=boot::flash::jedec_id();std::memcpy(response.data+8,&id,4);
     response.crc32=0U;response.crc32=update::crc32(&response,60U);response_pending=true;
 }

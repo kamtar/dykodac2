@@ -37,7 +37,10 @@ const flexspi_nor_config_t qspiflash_config = {
                 {
                     // Read LUTs
                     FLEXSPI_LUT_SEQ(CMD_SDR, FLEXSPI_1PAD, 0xEB, RADDR_SDR, FLEXSPI_4PAD, 0x18),
-                    FLEXSPI_LUT_SEQ(DUMMY_SDR, FLEXSPI_4PAD, 0x06, READ_SDR, FLEXSPI_4PAD, 0x04),
+                    // AT25SF081B: mode byte M7..M0, then two dummy bytes.
+                    // M=00 keeps the next transaction in normal (non-XiP) mode.
+                    FLEXSPI_LUT_SEQ(MODE8_SDR, FLEXSPI_4PAD, 0x00, DUMMY_SDR, FLEXSPI_4PAD, 0x04),
+                    FLEXSPI_LUT_SEQ(READ_SDR, FLEXSPI_4PAD, 0x04, STOP, 0, 0),
                 },
         },
     .pageSize           = 256u,

@@ -18,6 +18,34 @@ std::uint8_t dma_index = 0U;
 edma_handle_t dma_handle{};
 sai_edma_handle_t sai_handle{};
 
+constexpr std::size_t pcm_bytes_per_frame = 8U;
+constexpr std::size_t fade_frames = 32U;
+
+void scale_frame(std::uint8_t* frame, std::uint16_t gain) {
+    for (std::size_t channel = 0U; channel < 2U; ++channel) {
+        auto* sample_bytes = frame + channel * 4U;
+        std::int32_t sample = static_cast<std::int32_t>(sample_bytes[1]) |
+                              (static_cast<std::int32_t>(sample_bytes[2]) << 8U) |
+                              (static_cast<std::int32_t>(sample_bytes[3]) << 16U);
+        if ((sample & 0x00800000L) != 0) sample |= static_cast<std::int32_t>(0xFF000000UL);
+        const auto scaled = static_cast<std::int32_t>(
+            (static_cast<std::int64_t>(sample) * gain) / 32767);
+        sample_bytes[1] = static_cast<std::uint8_t>(scaled);
+        sample_bytes[2] = static_cast<std::uint8_t>(scaled >> 8U);
+        sample_bytes[3] = static_cast<std::uint8_t>(scaled >> 16U);
+    }
+}
+
+void fade(std::uint8_t* data, std::size_t first_frame, std::size_t frames, bool fade_in) {
+    if (frames == 0U) return;
+    for (std::size_t index = 0U; index < frames; ++index) {
+        const auto numerator = fade_in ? index : frames - index - 1U;
+        const auto denominator = frames > 1U ? frames - 1U : 1U;
+        const auto gain = static_cast<std::uint16_t>((numerator * 32767U) / denominator);
+        scale_frame(data + (first_frame + index) * pcm_bytes_per_frame, gain);
+    }
+}
+
 void dma_callback(I2S_Type*, sai_edma_handle_t*, status_t status, void* user_data) {
     const bool completed = status == kStatus_SAI_TxBusy || status == kStatus_SAI_TxIdle;
     static_cast<audio::AudioEngine*>(user_data)->on_dma_complete(completed);
@@ -30,7 +58,13 @@ bool AudioEngine::submit_silence() noexcept {
     dma_index ^= 1U;
     if (stream_) {
         const std::size_t read = stream_->pop(buffer, transfer_bytes_);
-        if (read != transfer_bytes_) ++underruns_;
+        if (read != transfer_bytes_) {
+            ++underruns_;
+            conceal_underrun(buffer, read);
+        } else if (concealment_active_) {
+            fade(buffer, 0U, fade_frames < transfer_bytes_ / pcm_bytes_per_frame ? fade_frames : transfer_bytes_ / pcm_bytes_per_frame, true);
+            concealment_active_ = false;
+        }
     } else {
         std::memset(buffer, 0, transfer_bytes_);
     }
@@ -52,6 +86,7 @@ bool AudioEngine::start(const FormatConfig& config, StreamBuffer& stream) noexce
         config.format.valid_bits != 24U) return false;
 
     stream_ = &stream;
+    concealment_active_ = false;
     transfer_bytes_ = static_cast<std::size_t>(config.dma_frames_per_transfer) * bytes_per_frame(config.format);
     if (transfer_bytes_ > sizeof(dma_audio[0])) return false;
     board::target::initialize_audio_pins();
@@ -90,6 +125,20 @@ bool AudioEngine::start(const FormatConfig& config, StreamBuffer& stream) noexce
     running_ = true;
     if (!submit_silence()) running_ = false;
     return running_;
+}
+
+void AudioEngine::conceal_underrun(std::uint8_t* buffer, std::size_t received_bytes) noexcept {
+    // Do not splice a late partial fragment into a silence gap.  Wait for a
+    // complete DMA block, then fade it in.  On the first short read, fade the
+    // end of valid PCM to digital zero rather than creating a step at the DAC.
+    if (concealment_active_) {
+        std::memset(buffer, 0, transfer_bytes_);
+        return;
+    }
+    const std::size_t received_frames = received_bytes / pcm_bytes_per_frame;
+    const std::size_t count = fade_frames < received_frames ? fade_frames : received_frames;
+    fade(buffer, received_frames - count, count, false);
+    concealment_active_ = true;
 }
 
 void AudioEngine::stop() noexcept {

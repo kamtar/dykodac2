@@ -427,10 +427,11 @@ int main() {
         if (runtime.stream_requested && runtime.engine.running() &&
             runtime.app.state() != app::State::FaultMuted && runtime.engine.dma_errors() != 0U)
             safe_stop(runtime, true, StopReason::DmaError);
-        else if (runtime.stream_requested && runtime.engine.running() &&
-                 runtime.app.state() == app::State::Playing &&
-                 runtime.engine.underruns() > runtime.underrun_baseline + 2U)
-            recover_from_underrun(runtime, now);
+        // A live stream gap is concealed in AudioEngine as a short fade to
+        // digital zero and a fade-in once a full DMA block is available.  Do
+        // not cycle the DAC mute or output relay here: those transitions are
+        // more audible than the missing samples and turn a recoverable USB
+        // scheduling hiccup into several pops.
         update_leds(runtime, now);
         refresh_diagnostics(runtime, now);
         if (trial_boot) {
