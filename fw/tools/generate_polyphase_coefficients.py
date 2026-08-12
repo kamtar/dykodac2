@@ -1,67 +1,167 @@
 #!/usr/bin/env python3
-"""Generate the checked-in binary32 FIR bank used by PolyphaseUpsampler.
+"""Generate the production 8192-tap exact-4x FIR and FFT partitions.
 
-The bank stores phases 0 through 0.5. Phases above 0.5 are exact reversed
-kernels from the complementary stored phase. It intentionally has no
-third-party dependencies.
+The prototype is evaluated on the 4x output grid in binary64, normalized so
+each of its four polyphase branches has unity DC gain, and then converted to
+binary32.  Runtime tables use the packed format consumed by CMSIS-DSP's
+arm_rfft_fast_f32: DC, Nyquist, then interleaved real/imaginary bins.
 """
-import math
+from __future__ import annotations
+
+import json
 from pathlib import Path
 
-PHASES = 64
-TAPS = 128
-CUTOFF = 0.47675             # cycles/input-sample
-KAISER_BETA = 10.0
+import numpy as np
 
 
-def i0(value: float) -> float:
-    total = 1.0
-    term = 1.0
-    for order in range(1, 40):
-        term *= (value * value) / (4.0 * order * order)
-        total += term
-        if abs(term) < abs(total) * 1e-15:
-            break
-    return total
+PROTOTYPE_TAPS = 8192
+PHASES = 4
+PHASE_TAPS = PROTOTYPE_TAPS // PHASES
+PARTITION_SIZE = 256
+FFT_SIZE = 2 * PARTITION_SIZE
+PARTITIONS = PHASE_TAPS // PARTITION_SIZE
+KAISER_BETA = 18.0
+# Cycles per source sample. On the 4x grid this is 0.1191875 cycles/sample.
+# At 44.1 kHz the -6 dB midpoint is 21.025675 kHz, leaving a symmetric
+# transition between the 20 kHz audio-band edge and source Nyquist.
+CUTOFF_SOURCE = 0.47677267573696145
+CUTOFF_OUTPUT = CUTOFF_SOURCE / PHASES
 
 
-def phase_row(phase: int):
-    delay = phase / PHASES
-    denominator = i0(KAISER_BETA)
-    values = []
-    for tap in range(TAPS):
-        x = tap - (TAPS / 2 - 1) - delay
-        argument = 2.0 * CUTOFF * x
-        sinc = 1.0 if abs(argument) < 1e-14 else math.sin(math.pi * argument) / (math.pi * argument)
-        radius = 2.0 * tap / (TAPS - 1) - 1.0
-        window = i0(KAISER_BETA * math.sqrt(max(0.0, 1.0 - radius * radius))) / denominator
-        values.append(2.0 * CUTOFF * sinc * window)
-    scale = sum(values)
-    return [value / scale for value in values]
+def design_prototype() -> np.ndarray:
+    n = np.arange(PROTOTYPE_TAPS, dtype=np.float64)
+    centre = (PROTOTYPE_TAPS - 1) / 2.0
+    prototype = (2.0 * CUTOFF_OUTPUT *
+                 np.sinc(2.0 * CUTOFF_OUTPUT * (n - centre)) *
+                 np.kaiser(PROTOTYPE_TAPS, KAISER_BETA))
+
+    # A 4x interpolation prototype must have total DC gain four. Normalizing
+    # each phase separately makes constant input exactly constant at all four
+    # fractional positions while preserving symmetry (phase 0 mirrors 3 and
+    # phase 1 mirrors 2).
+    for phase in range(PHASES):
+        prototype[phase::PHASES] /= np.sum(prototype[phase::PHASES])
+    # The checked-in binary32 prototype is the authoritative FIR. Spectra are
+    # generated from these exact values (promoted back to binary64 for the
+    # offline FFT), so direct and FFT tests never compare different filters.
+    return prototype.astype(np.float32)
 
 
-def float_literal(value: float) -> str:
-    text = format(value, ".9g")
+def cmsis_packed_rfft(values: np.ndarray) -> np.ndarray:
+    spectrum = np.fft.rfft(values)
+    packed = np.empty(FFT_SIZE, dtype=np.float32)
+    packed[0] = np.float32(spectrum[0].real)
+    packed[1] = np.float32(spectrum[-1].real)
+    packed[2::2] = spectrum[1:-1].real.astype(np.float32)
+    packed[3::2] = spectrum[1:-1].imag.astype(np.float32)
+    return packed
+
+
+def build_spectra(prototype: np.ndarray) -> np.ndarray:
+    spectra = np.empty((PHASES, PARTITIONS, FFT_SIZE), dtype=np.float32)
+    for phase in range(PHASES):
+        branch = prototype[phase::PHASES]
+        for partition in range(PARTITIONS):
+            block = np.zeros(FFT_SIZE, dtype=np.float64)
+            first = partition * PARTITION_SIZE
+            block[:PARTITION_SIZE] = branch[first:first + PARTITION_SIZE].astype(np.float64)
+            spectra[phase, partition] = cmsis_packed_rfft(block)
+    return spectra
+
+
+def float_literal(value: np.float32) -> str:
+    text = format(float(value), ".9g")
     if "." not in text and "e" not in text:
         text += ".0"
     return text + "F"
 
 
-def render() -> str:
-    stored_phases = PHASES // 2 + 1
-    rows = [phase_row(phase) for phase in range(stored_phases)]
-    lines = ["#pragma once", "", "#include <array>", "#include <cstdint>", "",
-             "namespace audio::detail {",
-             "__attribute__((section(\".dtcm_coefficients\"), aligned(32)))", 
-             f"inline const std::array<float, {stored_phases}U * {TAPS}U> polyphase_coefficients{{{{"]
-    for phase, row in enumerate(rows):
-        lines.append(f"    // phase {phase} ({phase / PHASES:.8f} input samples)")
-        lines.append("    " + ", ".join(float_literal(value) for value in row) + ",")
-    lines.extend(["}};", "} // namespace audio::detail", ""])
+def render_spectra(spectra: np.ndarray) -> str:
+    lines = [
+        "#pragma once", "", "#include <array>", "#include <cstddef>", "",
+        "namespace audio::detail {",
+        "// Layout: [phase][partition][CMSIS packed-real-FFT float].",
+        "// Kept in XIP QSPI; the runtime consumes each phase sequentially and",
+        "// shares every coefficient fetch between the left and right channels.",
+        "__attribute__((section(\".fft_coefficients\"), aligned(32)))",
+        f"inline const std::array<float, {PHASES}U * {PARTITIONS}U * {FFT_SIZE}U> "
+        "fft_filter_spectra{",
+    ]
+    for phase in range(PHASES):
+        lines.append(f"    // phase {phase}")
+        for partition in range(PARTITIONS):
+            lines.append(f"    // partition {partition}")
+            row = spectra[phase, partition]
+            for offset in range(0, FFT_SIZE, 8):
+                lines.append("    " + ", ".join(float_literal(v) for v in row[offset:offset + 8]) + ",")
+    lines.extend(["};", "} // namespace audio::detail", ""])
     return "\n".join(lines)
 
 
+def render_prototype(prototype: np.ndarray) -> str:
+    values = prototype
+    lines = [
+        "#pragma once", "", "#include <array>", "",
+        "namespace audio::test_detail {",
+        f"inline const std::array<float, {PROTOTYPE_TAPS}U> prototype_coefficients{{",
+    ]
+    for offset in range(0, PROTOTYPE_TAPS, 8):
+        lines.append("    " + ", ".join(float_literal(v) for v in values[offset:offset + 8]) + ",")
+    lines.extend(["};", "} // namespace audio::test_detail", ""])
+    return "\n".join(lines)
+
+
+def response_metrics(prototype: np.ndarray) -> dict[str, object]:
+    fft_points = 1 << 22
+    response = np.fft.rfft(prototype.astype(np.float64), fft_points)
+    magnitude = np.abs(response) / PHASES
+    frequency_output = np.fft.rfftfreq(fft_points, 1.0)
+
+    def db_at_source_fraction(fraction: float) -> float:
+        index = int(round((fraction / PHASES) * fft_points))
+        return float(20.0 * np.log10(max(magnitude[index], 1e-300)))
+
+    passband = frequency_output <= (20_000.0 / 176_400.0)
+    stopband = frequency_output >= (22_050.0 / 176_400.0)
+    passband_db = 20.0 * np.log10(np.maximum(magnitude[passband], 1e-300))
+    stopband_db = 20.0 * np.log10(np.maximum(magnitude[stopband], 1e-300))
+    return {
+        "prototype_taps": PROTOTYPE_TAPS,
+        "phase_taps": PHASE_TAPS,
+        "phases": PHASES,
+        "partition_size": PARTITION_SIZE,
+        "fft_size": FFT_SIZE,
+        "partitions_per_phase": PARTITIONS,
+        "kaiser_beta": KAISER_BETA,
+        "cutoff_cycles_per_source_sample": CUTOFF_SOURCE,
+        "cutoff_cycles_per_output_sample": CUTOFF_OUTPUT,
+        "dc_gain": float(np.sum(prototype) / PHASES),
+        "phase_dc_gains": [float(np.sum(prototype[p::PHASES])) for p in range(PHASES)],
+        "symmetry_peak_error": float(np.max(np.abs(prototype - prototype[::-1]))),
+        "passband_ripple_db_0_to_20khz_at_44k1": float(np.max(passband_db) - np.min(passband_db)),
+        "response_db_at_source_fraction": {
+            "10khz_44k1": db_at_source_fraction(10_000.0 / 44_100.0),
+            "19khz_44k1": db_at_source_fraction(19_000.0 / 44_100.0),
+            "20khz_44k1": db_at_source_fraction(20_000.0 / 44_100.0),
+            "nyquist_44k1": db_at_source_fraction(0.5),
+        },
+        "worst_stopband_db_from_22k05": float(np.max(stopband_db)),
+    }
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parents[1]
+    prototype = design_prototype()
+    spectra = build_spectra(prototype)
+    (root / "audio" / "fft_filter_spectra.hpp").write_text(
+        render_spectra(spectra), encoding="utf-8", newline="\n")
+    (root / "tests" / "host" / "fft_prototype_coefficients.hpp").write_text(
+        render_prototype(prototype), encoding="utf-8", newline="\n")
+    report = response_metrics(prototype)
+    (root / "tests" / "host" / "fft_filter_metrics.json").write_text(
+        json.dumps(report, indent=2) + "\n", encoding="utf-8", newline="\n")
+    print(json.dumps(report, indent=2))
+
+
 if __name__ == "__main__":
-    destination = Path(__file__).resolve().parents[1] / "audio" / "polyphase_coefficients.hpp"
-    destination.write_text(render(), encoding="utf-8", newline="\n")
-    print(f"wrote {destination} ({(PHASES // 2 + 1) * TAPS} coefficients)")
+    main()

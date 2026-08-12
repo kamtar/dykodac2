@@ -1,79 +1,89 @@
-# Dual-family polyphase output
+# 8192-tap exact-4x FFT interpolator
 
-The RT1011 sends the CS4398 either 176.4 kHz PCM from the 22.5792-MHz
-oscillator (44.1-kHz USB family) or 192 kHz PCM from the 24.576-MHz oscillator
-(48-kHz USB family). Each output sample advances an integer source position and
-a modulo-output-rate phase remainder by `input_rate_hz`. Thus 44.1 to 176.4
-and 48 to 192 are exact 4x conversions; 88.2 to 176.4 and 96 to 192 are exact
-2x conversions when configured by the converter API. Equal-rate configurations
-copy PCM directly and bypass the FIR. The USB descriptor currently advertises
-only 44.1 and 48 kHz, matching the existing product interface.
+The production USB paths are fixed at 44.1 to 176.4 kHz and 48 to 192 kHz.
+Both use one 8192-tap symmetric linear-phase prototype decomposed exactly as
+`Hp[k] = h[4*k+p]`, for four 2048-tap branches corresponding to source-sample
+fractions 0, 1/4, 1/2, and 3/4. There is no phase accumulator, 64-phase bank,
+phase rounding, or adaptive SRC ratio. Native 176.4 and 192 kHz configurations
+remain byte-for-byte bypasses.
 
-The phase bank is selected from the fractional position, so input-rate changes
-naturally select different phases rather than requiring a separate converter per
-rate. The nearest phase row is selected once per output sample. Phase rounding
-uses the endpoint row and bounds timing error to 1/128 of an input sample; the
-tap loop itself contains only native M7 single-precision FMAs. Fractional-delay
-kernels above phase 0.5 are exact reversals of their complementary lower-phase
-kernels, so only phases 0 through 32 are stored. The stored bank is copied from
-the factory image into DTCM at startup. The process function and its stereo FIR
-kernel run from ITCM.
+## Filter and convolution
 
-SAI/eDMA transfers use 176 output frames for the 176.4-kHz family and 192
-output frames for the 192-kHz family, keeping each block close to 1 ms.
+`tools/generate_polyphase_coefficients.py` designs the prototype in binary64
+as a Kaiser-windowed sinc on the 4x output grid. Its source-normalized cutoff is
+0.47677267573696145 cycles/source-sample (0.11919316893424036 on the output
+grid), Kaiser beta is 18, and all four phase branches are normalized to unity
+DC gain before conversion to the authoritative float32 prototype. The same
+normalized filter serves both clock families.
 
-The checked-in bank represents 64 fractional phases plus the phase-1 endpoint,
-with 128 taps per phase, binary32 coefficients, and a Kaiser window (`beta=10`,
-cutoff `0.47675` cycles/input-sample). Its 33 non-redundant stored rows occupy
-33 x 128 x 4 = 16,896 bytes in DTCM. Runtime history uses separate left/right
-128-frame rings, each mirrored once to make every 128-tap window contiguous
-(2,048 bytes total); the worst-case 896-byte source staging buffer is also in
-DTCM.
+Each 2048-tap branch is split into eight 256-tap partitions. A 512-point
+CMSIS-DSP packed real FFT implements uniform frequency-domain delay-line
+convolution with overlap-add. Each stereo source block needs two forward FFTs,
+shared by all phases. For a phase, each QSPI filter value is read once and used
+for both left and right complex accumulations, followed by two inverse FFTs.
+The second 256 samples of every inverse result are retained as overlap, so the
+result is linear convolution rather than circular convolution.
 
-The standard RT1011 FlexRAM split remains unchanged: 32 KiB ITCM, 32 KiB DTCM,
-and 64 KiB OCRAM. The Release link uses 62,624 of 392,704 application-slot
-bytes, 24,684 of 65,504 OCRAM bytes, 22,784 of 32,768 DTCM bytes, and 1,984 of
-32,768 ITCM bytes. The fixed 8-KiB stack occupies `0x20006000` through
-`0x20008000`, leaving 1,792 DTCM bytes between linked sections and the stack.
-The boot manager and both 384-KiB application slots remain unchanged.
+To bound main-loop refill time, a source-block FFT and each of the four phase
+slices are separate work units. Normal DMA calls execute at most one phase
+slice (16 KiB of contiguous coefficient reads). Four slices finish before the
+next 256-source-frame block can fill. The packed output queue is sized from a
+long-run cadence proof: its worst reservation is 1920 frames at 48 kHz and
+1764 frames at 44.1 kHz. It cannot overwrite output still owned by the
+consumer.
 
-The inner loop performs 176,400 x 128 x 2 = 45.16 million or 192,000 x 128 x 2
-= 49.15 million sample MACs per second using the 500-MHz Cortex-M7 FPv5 hardware
-FPU. Binary32 exactly
-represents every 24-bit input integer, phase selection occurs once per output,
-and convolution walks the power-of-two history ring without per-tap bounds
-checks. The filter needs 64 future input frames, adding about 1.45 ms at
-44.1 kHz or 1.33 ms at 48 kHz to the pipeline. The maintenance HID performance
-report exposes average, maximum, and last refill cycles plus the peak pending-
-refill depth.
+## Memory and flash traffic
 
-Four near-one-millisecond output buffers form a permanent eDMA scatter/gather ring.
-Each completion only retires buffer ownership in the interrupt; main context
-regenerates those retired buffers while eDMA continues from the remaining
-entries. The SDK's modulo TCD count is retained only as diagnostic evidence.
-Each DMA interrupt releases exactly one software entry; delayed queue positions
-are absorbed by subsequent interrupts instead of causing burst refills that
-advance the resampler and USB ring ahead of the output timeline. Audio service
-also runs between queued USB control and maintenance events.
+- QSPI: 65,536-byte `[phase][partition][packed bin]` coefficient table,
+  contiguous in consumption order.
+- OCRAM: 32,768-byte stereo frequency-domain delay line plus 7,680 bytes of
+  the packed output queue.
+- DTCM: accumulators, FFT scratch, input block, four-phase stereo overlap, the
+  3,840-byte queue extension, and existing eDMA state.
+- ITCM: CMSIS RFFT/CFFT kernels and interpolation hot functions.
+- Heap: unused in the audio path.
 
-A 512-tap hardware experiment was rejected because its direct stereo FIR was
-projected from the measured 64-tap baseline to require about 816,000 average
-and 914,000 worst-case cycles per one-millisecond refill, exceeding the
-500,000-cycle deadline at 500 MHz. A 1024-tap direct FIR would be further over
-budget. The 128-tap design is the largest conservative step from that baseline;
-its actual target timing must still be confirmed through the performance
-report after flashing.
+At 48 kHz a 256-frame partition arrives 187.5 times/s. Traversing all 64 KiB
+of spectra once per source block is 12.288 MB/s of coefficient traffic. Stereo
+sharing prevents that traffic from doubling. At 44.1 kHz it is 11.290 MB/s.
 
-`tools/generate_polyphase_coefficients.py` regenerates the exact checked-in
-header without third-party packages. Host tests cover complete-block output,
-both output families, exact 4x and 2x phase progression, native-rate bypass, DC
-response after FIR warm-up, bit-exact equivalence between blocked and larger
-streaming calls across history wraps, and CS4398 register mode writes.
+The Release map reports 119,564 bytes flash, 65,164/65,504 bytes OCRAM,
+24,064/32,768 bytes linked DTCM before the fixed 8 KiB stack, and
+4,576/32,768 bytes ITCM. The linked DTCM state ends 512 bytes below the stack.
 
-USB and DAC clocks are independent physical domains. The firmware uses the
-asynchronous USB feedback endpoint and a bounded ring-fill controller to make
-the host adjust its packet cadence toward the selected DAC clock. The SRC ratio
-itself remains the exact nominal rational ratio; it is not adaptively retuned.
-Consequently, feedback handles long-term oscillator drift while the ring
-absorbs short-term packet jitter. There is no hardware clock-lock or adaptive
-SRC-ratio mechanism in this design.
+## Reset and latency
+
+Every `configure()` call clears the input block, FFT history, overlap, spectral
+accumulators, output queue, scheduling state, and startup delay. Audio start
+always configures the converter, so startup, stream restart, USB rate change,
+and clock-family restart cannot retain old filter state. The existing clock
+switch/mute/SAI/eDMA sequence is unchanged.
+
+The FIR group delay is 4095.5 output samples: 23.217120 ms at 176.4 kHz and
+21.330729 ms at 192 kHz. Bounded FFT collection/scheduling adds exactly 10 ms
+of digital-zero startup. The existing four-buffer DMA ring contributes
+3.990930 ms at 176.4 kHz or 4.000000 ms at 192 kHz. Total pipeline latency is
+therefore 37.208050 ms and 35.330729 ms respectively.
+
+## Verification
+
+The C++ host suite runs the actual CMSIS streaming core and compares its float
+output against binary64 direct convolution using the exact float32 prototype.
+It covers impulse, DC, 1/10/19/20 kHz, sweep, multitone, deterministic random
+input, all 256-frame partition boundaries, both DMA cadences, phase ordering,
+native bypass, and reset. The measured worst absolute FFT/direct difference is
+0.000463735 for test amplitudes of 1000 (4.64e-7 relative); the worst vector RMS
+difference is 7.36382e-5.
+
+`tests/host/verify_fft_interpolator.py` writes detailed response and known
+high-rate reconstruction results to `docs/fft-interpolator-verification.json`.
+Passband ripple through 20 kHz at 44.1 kHz is 2.071e-6 dB, the 20 kHz first
+image is -163.14 dB relative, and worst stopband from 22.05 kHz is -149.87 dB
+for the exact float32 prototype. Known-reference multitone reconstruction RMS
+error is 7.34e-9 at 44.1 kHz and 7.44e-9 at 48 kHz.
+
+Target CPU usage and worst refill cycles cannot be truthfully measured without
+running this image on the RT1011. The existing maintenance HID refill-timing
+report exposes count, total, maximum, last cycles, maximum pending depth, and
+coalesced callbacks. Those hardware values must be captured after flashing;
+no host timing is presented as target timing.

@@ -6,7 +6,9 @@ workspace "dykodac2"
     warnings "Extra"
 
 local nxp_sdk = "third_party/nxp-mcuxpresso"
+local cmsis_dsp = "third_party/cmsis-dsp"
 local common_includes = { ".", "platform/nxp", "usb", "third_party/tinyusb/src",
+    cmsis_dsp .. "/Include", cmsis_dsp .. "/PrivateInclude",
     nxp_sdk .. "/board", nxp_sdk .. "/CMSIS", nxp_sdk .. "/device", nxp_sdk .. "/periph",
     nxp_sdk .. "/drivers", nxp_sdk .. "/xip" }
 local cpu_options = { "-mcpu=cortex-m7", "-mfpu=fpv5-sp-d16", "-mfloat-abi=hard", "-mthumb" }
@@ -17,10 +19,19 @@ local sdk_core = { nxp_sdk .. "/board/clock_config.c", nxp_sdk .. "/device/syste
 local tinyusb_core = { "third_party/tinyusb/src/tusb.c", "third_party/tinyusb/src/common/tusb_fifo.c",
     "third_party/tinyusb/src/device/usbd.c", "third_party/tinyusb/src/class/hid/hid_device.c",
     "third_party/tinyusb/src/portable/chipidea/ci_hs/dcd_ci_hs.c" }
+local cmsis_dsp_fft = {
+    cmsis_dsp .. "/Source/TransformFunctions/arm_bitreversal2.c",
+    cmsis_dsp .. "/Source/TransformFunctions/arm_cfft_f32.c",
+    cmsis_dsp .. "/Source/TransformFunctions/arm_cfft_radix8_f32.c",
+    cmsis_dsp .. "/Source/TransformFunctions/arm_rfft_fast_f32.c",
+    cmsis_dsp .. "/Source/CommonTables/arm_common_tables.c",
+    cmsis_dsp .. "/Source/CommonTables/arm_const_structs.c"
+}
 
 local function target_common()
     includedirs(common_includes)
     defines(common_defines)
+    defines { "ARM_MATH_CM7", "DISABLEFLOAT16" }
     buildoptions(cpu_options)
     buildoptions { "-ffunction-sections", "-fdata-sections", "-ffreestanding",
         "-fno-exceptions", "-fstack-usage", "-Wall", "-Wextra", "-Wconversion", "-Wshadow", "-Wundef" }
@@ -29,6 +40,8 @@ local function target_common()
         "-Wl,--gc-sections", "-Wl,--cref", "-Wl,--print-memory-usage" }
     filter "configurations:HostTest" flags { "ExcludeFromBuild" }
     filter "files:**.cpp" buildoptions { "-fno-rtti", "-fno-threadsafe-statics", "-fno-use-cxa-atexit" }
+    filter "files:third_party/cmsis-dsp/Source/TransformFunctions/**.c"
+        defines { 'ARM_DSP_ATTRIBUTE=__attribute__((section(".itcm_text")))' }
     filter "configurations:Debug" defines { "DEBUG=1" } optimize "Debug" symbols "On"
     filter "configurations:Release" optimize "Speed" symbols "Off" buildoptions { "-O2" }
     filter {}
@@ -47,6 +60,7 @@ local app_sources = {
 }
 for _,f in ipairs(tinyusb_core) do table.insert(app_sources,f) end
 for _,f in ipairs(sdk_core) do table.insert(app_sources,f) end
+for _,f in ipairs(cmsis_dsp_fft) do table.insert(app_sources,f) end
 
 local function app_project(name,suffix,address)
     project(name)
@@ -85,7 +99,8 @@ project "dykodac2_host_tests"
     files { "app/app_controller.cpp", "audio/sample_rate.cpp", "audio/polyphase_upsampler.cpp", "audio/stream_buffer.cpp", "audio/feedback_controller.cpp",
         "devices/dac.cpp", "platform/nxp/update_layout.cpp", "platform/nxp/sha256.cpp",
         "usb/usb_event_queue_host.cpp", "tests/host/**.cpp" }
-    includedirs { "." }
+    for _,f in ipairs(cmsis_dsp_fft) do files { f } end
+    includedirs { ".", cmsis_dsp .. "/Include", cmsis_dsp .. "/PrivateInclude" }
     filter "configurations:not HostTest" flags { "ExcludeFromBuild" }
-    filter "configurations:HostTest" defines { "DYKODAC_HOST_TEST=1" } buildoptions { "-Wconversion", "-Wshadow", "-Wundef" }
+    filter "configurations:HostTest" defines { "DYKODAC_HOST_TEST=1", "DISABLEFLOAT16", "__GNUC_PYTHON__" } buildoptions { "-Wconversion", "-Wshadow", "-Wundef" }
     filter {}

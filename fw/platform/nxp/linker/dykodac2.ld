@@ -29,6 +29,8 @@ SECTIONS
         __bss_section_table_end = .;
         __section_table_end = .;
         *(.after_vectors*) *(.text*) *(.rodata*)
+        . = ALIGN(32);
+        *(.fft_coefficients*)
         KEEP(*(.init)) KEEP(*(.fini))
         . = ALIGN(4);
     } > FLASH
@@ -43,6 +45,13 @@ SECTIONS
     } > SRAM_ITC AT > FLASH
     .data : ALIGN(4) { _data = .; *(.data*) . = ALIGN(4); _edata = .; } > SRAM_OC AT > FLASH
     .dma (NOLOAD) : ALIGN(32) { __dma_start__ = .; *(.dma*) . = ALIGN(32); __dma_end__ = .; } > SRAM_DTC
+    .fft_working (NOLOAD) : ALIGN(32)
+    {
+        __fft_working_start__ = .;
+        *(.fft_working*)
+        . = ALIGN(32);
+        __fft_working_end__ = .;
+    } > SRAM_DTC
     .dtcm_history (NOLOAD) : ALIGN(32)
     {
         __dtcm_history_start__ = .;
@@ -57,14 +66,21 @@ SECTIONS
         . = ALIGN(32);
         __dtcm_coefficients_end__ = .;
     } > SRAM_DTC AT > FLASH
+    .fft_state_ocram (NOLOAD) : ALIGN(32)
+    {
+        __fft_state_ocram_start__ = .;
+        *(.fft_state_ocram*)
+        . = ALIGN(32);
+        __fft_state_ocram_end__ = .;
+    } > SRAM_OC
     .bss (NOLOAD) : ALIGN(4) { _bss = .; *(.bss*) *(COMMON) . = ALIGN(4); _ebss = .; end = .; } > SRAM_OC
     .noinit (NOLOAD) : ALIGN(4) { *(.noinit*) } > SRAM_OC
     _HeapSize = 0; _pvHeapStart = .; _pvHeapLimit = .;
     _StackSize = 0x2000;
     _vStackBase = ORIGIN(SRAM_DTC) + LENGTH(SRAM_DTC) - _StackSize;
     _vStackTop = ORIGIN(SRAM_DTC) + LENGTH(SRAM_DTC);
-    ASSERT(__dtcm_coefficients_end__ <= _vStackBase, "DTCM coefficients overlap the stack")
-    ASSERT(SIZEOF(.bss) + SIZEOF(.data) + SIZEOF(.noinit) <= LENGTH(SRAM_OC), "OCRAM overflow")
+    ASSERT(__dtcm_coefficients_end__ <= _vStackBase, "DTCM FFT state overlaps the stack")
+    ASSERT(SIZEOF(.fft_state_ocram) + SIZEOF(.bss) + SIZEOF(.data) + SIZEOF(.noinit) <= LENGTH(SRAM_OC), "OCRAM overflow")
     ASSERT(SIZEOF(.itcm_text) <= LENGTH(SRAM_ITC), "ITCM hot code exceeds ITCM")
     _image_start = LOADADDR(.text);
     _image_end = LOADADDR(.dtcm_coefficients) + SIZEOF(.dtcm_coefficients);

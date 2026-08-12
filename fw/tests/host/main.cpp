@@ -12,16 +12,149 @@
 #include "usb/diagnostic_report.hpp"
 #include "platform/nxp/sha256.hpp"
 #include "platform/nxp/update_layout.hpp"
+#include "tests/host/fft_prototype_coefficients.hpp"
+#include "audio/fft_filter_spectra.hpp"
+
+extern "C" {
+#include "arm_common_tables.h"
+#include "arm_const_structs.h"
+#include "dsp/transform_functions.h"
+}
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <random>
 #include <vector>
 
 namespace {
+double fft_direct_peak_error = 0.0;
+double fft_direct_worst_rms_error = 0.0;
+
 void check(bool condition, const char* message) {
     if (!condition) { std::cerr << "FAIL: " << message << '\n'; std::exit(1); }
+}
+
+void pack_sample(std::uint8_t* destination, std::int32_t sample) {
+    const std::uint32_t packed = (static_cast<std::uint32_t>(sample) & 0x00FF'FFFFU) << 8U;
+    for (std::size_t byte = 0U; byte < 4U; ++byte)
+        destination[byte] = static_cast<std::uint8_t>(packed >> (byte * 8U));
+}
+
+std::vector<double> direct_interpolate(const std::vector<std::int32_t>& source) {
+    const std::size_t output_source_frames =
+        source.size() + audio::PolyphaseUpsampler::taps_per_phase - 1U;
+    std::vector<double> output(output_source_frames * 4U, 0.0);
+    for (std::size_t n = 0U; n < output_source_frames; ++n) {
+        const std::size_t first_tap = n < source.size() ? 0U : n - source.size() + 1U;
+        const std::size_t last_tap = n < audio::PolyphaseUpsampler::taps_per_phase ?
+            n : audio::PolyphaseUpsampler::taps_per_phase - 1U;
+        if (first_tap > last_tap) continue;
+        for (std::size_t phase = 0U; phase < 4U; ++phase) {
+            double sum = 0.0;
+            for (std::size_t tap = first_tap; tap <= last_tap; ++tap) {
+                sum += static_cast<double>(source[n - tap]) *
+                    static_cast<double>(audio::test_detail::prototype_coefficients[tap * 4U + phase]);
+            }
+            output[n * 4U + phase] = sum;
+        }
+    }
+    return output;
+}
+
+std::vector<float> fft_interpolate(const std::vector<std::int32_t>& source,
+                                   std::uint32_t input_rate) {
+    const std::uint32_t output_rate = input_rate * 4U;
+    const std::size_t dma_output_frames = output_rate / 1'000U;
+    const std::size_t dma_input_frames = dma_output_frames / 4U;
+    const std::size_t latency_frames = output_rate / 100U;
+    const std::size_t reference_frames =
+        (source.size() + audio::PolyphaseUpsampler::taps_per_phase - 1U) * 4U;
+    const std::size_t wanted_frames = latency_frames + reference_frames + dma_output_frames;
+    const std::size_t calls = (wanted_frames + dma_output_frames - 1U) / dma_output_frames;
+
+    audio::PolyphaseUpsampler converter;
+    check(converter.configure(input_rate, output_rate), "FFT test converter configures");
+    std::vector<float> result;
+    result.reserve(calls * dma_output_frames);
+    std::vector<std::uint8_t> input(dma_input_frames * 8U, 0U);
+    std::vector<std::uint8_t> output(dma_output_frames * 8U, 0U);
+    std::vector<float> float_output(dma_output_frames * 2U, 0.0F);
+    std::size_t source_offset = 0U;
+    for (std::size_t call = 0U; call < calls; ++call) {
+        std::fill(input.begin(), input.end(), 0U);
+        for (std::size_t frame = 0U; frame < dma_input_frames; ++frame) {
+            const std::int32_t value = source_offset < source.size() ? source[source_offset] : 0;
+            pack_sample(input.data() + frame * 8U, value);
+            pack_sample(input.data() + frame * 8U + 4U, -value);
+            ++source_offset;
+        }
+        check(converter.process(input.data(), dma_input_frames, output.data(), dma_output_frames) ==
+              dma_output_frames, "FFT test produces a complete DMA block");
+        check(converter.copy_last_float_output(float_output.data(), dma_output_frames) ==
+              dma_output_frames, "FFT test exposes pre-quantization output");
+        for (std::size_t frame = 0U; frame < dma_output_frames; ++frame)
+            result.push_back(float_output[frame * 2U]);
+    }
+    return result;
+}
+
+void compare_fft_reference(const std::vector<std::int32_t>& source,
+                           std::uint32_t input_rate, const char* name,
+                           double tolerance) {
+    const auto reference = direct_interpolate(source);
+    const auto actual = fft_interpolate(source, input_rate);
+    const std::size_t latency = input_rate * 4U / 100U;
+    check(actual.size() >= latency + reference.size(), "FFT result covers direct reference");
+    double maximum = 0.0;
+    std::size_t maximum_frame = 0U;
+    long double error_energy = 0.0L;
+    for (std::size_t frame = 0U; frame < reference.size(); ++frame) {
+        const double error = static_cast<double>(actual[latency + frame]) - reference[frame];
+        if (std::abs(error) > maximum) {
+            maximum = std::abs(error);
+            maximum_frame = frame;
+        }
+        error_energy += static_cast<long double>(error) * error;
+    }
+    const double rms = std::sqrt(static_cast<double>(error_energy / reference.size()));
+    fft_direct_peak_error = std::max(fft_direct_peak_error, maximum);
+    fft_direct_worst_rms_error = std::max(fft_direct_worst_rms_error, rms);
+    if (maximum > tolerance) {
+        std::size_t actual_peak = 0U;
+        std::size_t actual_first = 0U;
+        while (actual_first < actual.size() && std::abs(actual[actual_first]) < 1.0e-12F)
+            ++actual_first;
+        long double best_energy = std::numeric_limits<long double>::max();
+        int best_shift = 0;
+        for (int shift = -300; shift <= 300; ++shift) {
+            long double energy = 0.0L;
+            std::size_t count = 0U;
+            for (std::size_t frame = 300U; frame + 300U < reference.size(); ++frame) {
+                const auto index = static_cast<std::size_t>(static_cast<long long>(latency + frame) + shift);
+                const long double error = static_cast<long double>(actual[index]) - reference[frame];
+                energy += error * error;
+                ++count;
+            }
+            energy /= count;
+            if (energy < best_energy) { best_energy = energy; best_shift = shift; }
+        }
+        for (std::size_t frame = 1U; frame < reference.size(); ++frame)
+            if (std::abs(actual[latency + frame]) > std::abs(actual[latency + actual_peak]))
+                actual_peak = frame;
+        std::cerr << "FAIL: " << name << " FFT/direct max=" << maximum
+                  << " rms=" << rms << " frame=" << maximum_frame
+                  << " actual=" << actual[latency + maximum_frame]
+                  << " reference=" << reference[maximum_frame]
+                  << " actual_peak_frame=" << actual_peak
+                  << " actual_first=" << actual_first
+                  << " best_shift=" << best_shift
+                  << " tolerance=" << tolerance << '\n';
+        std::exit(1);
+    }
 }
 
 struct MockDacTransport final : devices::DacTransport {
@@ -122,64 +255,49 @@ int main() {
     check(audio::usb_hs_packet_bytes(*audio::find_format(48'000U), 0U) == 48U, "48k packet size");
     check(audio::find_format(48'000U)->usb_hs_max_packet_bytes == 56U,
           "asynchronous endpoint allows one positive correction frame");
-    check(audio::PolyphaseUpsampler::taps_per_phase == 128U,
-          "real-time upsampler uses 128 taps per phase");
+    check(audio::PolyphaseUpsampler::prototype_taps == 8192U &&
+          audio::PolyphaseUpsampler::phase_count == 4U &&
+          audio::PolyphaseUpsampler::taps_per_phase == 2048U &&
+          audio::PolyphaseUpsampler::partition_size == 256U &&
+          audio::PolyphaseUpsampler::fft_size == 512U &&
+          audio::PolyphaseUpsampler::partition_count == 8U,
+          "production FFT interpolator geometry is fixed");
+    for (std::size_t phase = 0U; phase < 4U; ++phase) {
+        double gain = 0.0;
+        for (std::size_t tap = 0U; tap < 2048U; ++tap)
+            gain += audio::test_detail::prototype_coefficients[tap * 4U + phase];
+        check(std::abs(gain - 1.0) < 2.0e-7, "each exact fractional phase has unity DC gain");
+    }
+    for (std::size_t tap = 0U; tap < 8192U; ++tap)
+        check(audio::test_detail::prototype_coefficients[tap] ==
+              audio::test_detail::prototype_coefficients[8191U - tap],
+              "prototype remains exactly symmetric in float32");
+    arm_rfft_fast_instance_f32 test_fft{};
+    test_fft.Sint = arm_cfft_sR_f32_len256;
+    test_fft.fftLenRFFT = 512U;
+    test_fft.pTwiddleRFFT = twiddleCoef_rfft_512;
+    std::array<float, 512U> test_time{};
+    std::array<float, 512U> test_spectrum{};
+    for (std::size_t tap = 0U; tap < 256U; ++tap)
+        test_time[tap] = audio::test_detail::prototype_coefficients[tap * 4U];
+    arm_rfft_fast_f32(&test_fft, test_time.data(), test_spectrum.data(), 0U);
+    float spectrum_error = 0.0F;
+    for (std::size_t bin = 0U; bin < 512U; ++bin)
+        spectrum_error = std::max(spectrum_error,
+            std::abs(test_spectrum[bin] - audio::detail::fft_filter_spectra[bin]));
+    check(spectrum_error < 2.0e-6F, "offline spectra match CMSIS packed RFFT convention");
 
     audio::PolyphaseUpsampler upsampler;
-    check(upsampler.configure(44'100U, 176'400U), "44.1 to 176.4 kHz upsampler configuration");
-    check(upsampler.output_rate_hz() == 176'400U, "44.1-family output rate is configured");
-    constexpr std::size_t output_frames = 6'400U;
-    const std::size_t input_needed = upsampler.input_frames_needed(output_frames);
-    std::vector<std::uint8_t> upsample_input(input_needed * 8U, 0U);
-    std::vector<std::uint8_t> upsample_output(output_frames * 8U, 0U);
-    check(upsampler.process(upsample_input.data(), input_needed, upsample_output.data(), output_frames) == output_frames,
-          "44.1 kHz upsampler produces a complete output block");
-    check(upsampler.position_numerator() == static_cast<std::uint64_t>(output_frames) * 44'100U,
-          "44.1 kHz rational phase accumulator is exact");
-    check(upsampler.configure(48'000U, 192'000U), "48 to 192 kHz upsampler configuration");
-    check(upsampler.input_frames_needed(192U) == 112U,
-          "48 kHz phase scheduler includes the fixed FIR lookahead");
-    constexpr std::size_t dc_output_frames = 1'536U;
-    const std::size_t dc_input_frames = upsampler.input_frames_needed(dc_output_frames);
-    std::vector<std::uint8_t> dc_input(dc_input_frames * 8U, 0U);
-    for (std::size_t frame = 0U; frame < dc_input_frames; ++frame) {
-        dc_input[frame * 8U + 1U] = 0xFFU;
-        dc_input[frame * 8U + 2U] = 0xFFU;
-        dc_input[frame * 8U + 3U] = 0x7FU;
-        dc_input[frame * 8U + 5U] = 0xFFU;
-        dc_input[frame * 8U + 6U] = 0xFFU;
-        dc_input[frame * 8U + 7U] = 0x7FU;
-    }
-    std::fill(upsample_output.begin(), upsample_output.end(), 0U);
-    check(upsampler.process(dc_input.data(), dc_input_frames, upsample_output.data(), dc_output_frames) == dc_output_frames,
-          "48 kHz upsampler produces a complete DC block");
-    check(upsample_output[1'280U * 8U + 3U] >= 0x7EU &&
-          upsample_output[1'280U * 8U + 7U] >= 0x7EU,
-          "polyphase DC response remains near unity after FIR warm-up");
+    check(upsampler.configure(44'100U, 176'400U) &&
+          upsampler.input_frames_needed(176U) == 44U,
+          "44.1 to 176.4 kHz is exact 4x");
+    check(upsampler.configure(48'000U, 192'000U) &&
+          upsampler.input_frames_needed(192U) == 48U,
+          "48 to 192 kHz is exact 4x");
+    check(!upsampler.configure(88'200U, 176'400U) &&
+          !upsampler.configure(96'000U, 192'000U),
+          "unused general fractional and 2x SRC modes are removed");
 
-    // Exact integer-family ratios must walk the phase bank without any
-    // nearest-phase drift: 4x is 0, 1/4, 1/2, 3/4 and 2x is 0, 1/2.
-    audio::PolyphaseUpsampler phase_4x;
-    check(phase_4x.configure(44'100U, 176'400U), "4x phase test configuration");
-    std::vector<std::uint8_t> phase_input(65U * 8U, 0U);
-    std::array<std::uint32_t, 4U> phase_4x_expected{{44'100U, 88'200U, 132'300U, 0U}};
-    std::array<std::uint8_t, 8U> phase_output{};
-    for (const auto expected : phase_4x_expected) {
-        const std::size_t needed = phase_4x.input_frames_needed(1U);
-        check(phase_4x.process(needed == 0U ? nullptr : phase_input.data(), needed,
-                               phase_output.data(), 1U) == 1U,
-              "4x phase test renders one frame");
-        check(phase_4x.phase_remainder() == expected, "4x phase progression is exact");
-    }
-    audio::PolyphaseUpsampler phase_2x;
-    check(phase_2x.configure(88'200U, 176'400U), "2x phase test configuration");
-    for (const auto expected : std::array<std::uint32_t, 2U>{{88'200U, 0U}}) {
-        const std::size_t needed = phase_2x.input_frames_needed(1U);
-        check(phase_2x.process(needed == 0U ? nullptr : phase_input.data(), needed,
-                               phase_output.data(), 1U) == 1U,
-              "2x phase test renders one frame");
-        check(phase_2x.phase_remainder() == expected, "2x phase progression is exact");
-    }
     audio::PolyphaseUpsampler native;
     check(native.configure(176'400U, 176'400U), "native 176.4 kHz configuration");
     std::array<std::uint8_t, 32U> native_input{};
@@ -190,48 +308,45 @@ int main() {
           native.process(native_input.data(), 4U, native_output.data(), 4U) == 4U &&
           native_output == native_input,
           "native-rate path bypasses the FIR without changing PCM");
-    audio::PolyphaseUpsampler rate_96;
-    check(rate_96.configure(96'000U, 192'000U), "96 to 192 kHz configuration");
-    check(rate_96.input_frames_needed(192U) == 160U,
-          "96 to 192 scheduler includes the FIR lookahead");
 
-    // One-millisecond calls and large calls must remain exactly equivalent
-    // across mirrored-history wrap boundaries and complementary/reversed
-    // phase-kernel selection.
-    constexpr std::size_t comparison_frames = 192U * 10U;
-    audio::PolyphaseUpsampler full_call;
-    audio::PolyphaseUpsampler blocked_call;
-    check(full_call.configure(44'100U, 176'400U) && blocked_call.configure(44'100U, 176'400U),
-          "comparison upsamplers configure");
-    const std::size_t comparison_input_frames = full_call.input_frames_needed(comparison_frames);
-    std::vector<std::uint8_t> comparison_input(comparison_input_frames * 8U, 0U);
-    for (std::size_t frame = 0U; frame < comparison_input_frames; ++frame) {
-        const std::int32_t left = static_cast<std::int32_t>((frame * 104'729U) & 0x00FF'FFFFU) - 0x0080'0000;
-        const std::int32_t right = -left;
-        const std::uint32_t packed_left = (static_cast<std::uint32_t>(left) & 0x00FF'FFFFU) << 8U;
-        const std::uint32_t packed_right = (static_cast<std::uint32_t>(right) & 0x00FF'FFFFU) << 8U;
-        for (std::size_t byte = 0U; byte < 4U; ++byte) {
-            comparison_input[frame * 8U + byte] = static_cast<std::uint8_t>(packed_left >> (byte * 8U));
-            comparison_input[frame * 8U + 4U + byte] = static_cast<std::uint8_t>(packed_right >> (byte * 8U));
-        }
+    // Direct binary64 convolution uses the exact checked-in float32 prototype.
+    // These vectors exercise every 256-frame partition and FFT boundary.
+    std::vector<std::int32_t> impulse(1'025U, 0);
+    impulse[0] = 1'000;
+    compare_fft_reference(impulse, 48'000U, "impulse", 2.0e-3);
+    std::vector<std::int32_t> dc(1'025U, 1'000);
+    compare_fft_reference(dc, 44'100U, "DC", 8.0e-3);
+    for (const double frequency : {1'000.0, 10'000.0, 19'000.0, 20'000.0}) {
+        std::vector<std::int32_t> tone(1'025U, 0);
+        const double rate = frequency == 1'000.0 ? 48'000.0 : 44'100.0;
+        for (std::size_t sample = 0U; sample < tone.size(); ++sample)
+            tone[sample] = static_cast<std::int32_t>(std::lround(
+                1'000.0 * std::sin(2.0 * 3.14159265358979323846 * frequency * sample / rate)));
+        compare_fft_reference(tone, static_cast<std::uint32_t>(rate), "sine", 1.2e-2);
     }
-    std::vector<std::uint8_t> full_output(comparison_frames * 8U, 0U);
-    std::vector<std::uint8_t> blocked_output(comparison_frames * 8U, 0U);
-    check(full_call.process(comparison_input.data(), comparison_input_frames,
-                            full_output.data(), comparison_frames) == comparison_frames,
-          "large-call reference produces all frames");
-    std::size_t comparison_input_offset = 0U;
-    for (std::size_t output_offset = 0U; output_offset < comparison_frames; output_offset += 192U) {
-        const std::size_t needed = blocked_call.input_frames_needed(192U);
-        check(blocked_call.process(comparison_input.data() + comparison_input_offset * 8U, needed,
-                                   blocked_output.data() + output_offset * 8U, 192U) == 192U,
-              "blocked production path produces all frames");
-        comparison_input_offset += needed;
+    std::vector<std::int32_t> multitone(1'025U, 0);
+    for (std::size_t sample = 0U; sample < multitone.size(); ++sample) {
+        const double time = static_cast<double>(sample) / 48'000.0;
+        multitone[sample] = static_cast<std::int32_t>(std::lround(
+            250.0 * (std::sin(2.0 * 3.14159265358979323846 * 997.0 * time) +
+                     std::sin(2.0 * 3.14159265358979323846 * 7'001.0 * time) +
+                     std::sin(2.0 * 3.14159265358979323846 * 13'003.0 * time))));
     }
-    check(comparison_input_offset == comparison_input_frames,
-          "blocked and large-call paths consume the same input schedule");
-    check(full_output == blocked_output,
-          "mirrored production path is bit-exact with bounded streaming path");
+    compare_fft_reference(multitone, 48'000U, "multitone", 1.2e-2);
+    std::vector<std::int32_t> sweep(1'025U, 0);
+    for (std::size_t sample = 0U; sample < sweep.size(); ++sample) {
+        const double fraction = static_cast<double>(sample) / (sweep.size() - 1U);
+        const double phase = 2.0 * 3.14159265358979323846 *
+            (100.0 * sample / 44'100.0 + 0.5 * (20'000.0 - 100.0) *
+             sample * sample / (44'100.0 * sweep.size()));
+        sweep[sample] = static_cast<std::int32_t>(std::lround(1'000.0 * std::sin(phase + fraction * 0.0)));
+    }
+    compare_fft_reference(sweep, 44'100U, "swept sine", 1.2e-2);
+    std::mt19937 random_generator(0x8192U);
+    std::uniform_int_distribution<std::int32_t> random_sample(-1'000, 1'000);
+    std::vector<std::int32_t> random(1'537U, 0);
+    for (auto& sample : random) sample = random_sample(random_generator);
+    compare_fft_reference(random, 48'000U, "random", 1.5e-2);
 
     audio::StreamBuffer ring;
     std::array<std::uint8_t, audio::StreamBuffer::capacity_bytes> ring_data{};
@@ -342,6 +457,8 @@ int main() {
               !safety.outputs().audio_running, "all stop/fault events enforce relay safety");
     }
 
+    std::cout << "FFT/direct peak error: " << fft_direct_peak_error
+              << ", worst vector RMS error: " << fft_direct_worst_rms_error << '\n';
     std::cout << "All DykoDAC2 host tests passed\n";
     return 0;
 }

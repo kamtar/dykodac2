@@ -1,0 +1,27 @@
+{
+  "prototype_taps": 8192,
+  "phase_taps": 2048,
+  "phases": 4,
+  "partition_size": 256,
+  "fft_size": 512,
+  "partitions_per_phase": 8,
+  "kaiser_beta": 18.0,
+  "cutoff_cycles_per_source_sample": 0.47677267573696147,
+  "cutoff_cycles_per_output_sample": 0.11919316893424037,
+  "dc_gain": 1.0,
+  "phase_dc_gains": [
+    1.0000001192092896,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "symmetry_peak_error": 0.0,
+  "passband_ripple_db_0_to_20khz_at_44k1": 1.2203900791342447e-07,
+  "response_db_at_source_fraction": {
+    "10khz_44k1": 8.870086693699655e-08,
+    "19khz_44k1": 5.962340290905925e-09,
+    "20khz_44k1": 2.484663774370192e-08,
+    "nyquist_44k1": -161.53605215337728
+  },
+  "worst_stopband_db_from_22k05": -149.87172262732025
+}

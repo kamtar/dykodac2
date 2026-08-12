@@ -17,3 +17,8 @@ The RT1010 device layer is vendored from
 (2026-06-25). This revision splits the device register definitions into the
 `periph/` headers; those files are intentionally kept together with the updated
 MIMXRT1011 device header.
+
+CMSIS-DSP is pinned to release 1.17.1, commit
+`4b4fa8ff218ca5ac20bad71b653a37d93815f24b`. The repository vendors the
+Apache-2.0 headers and only the packed-real FFT source/table units used by the
+512-point interpolation convolution. No machine-local DSP library is linked.

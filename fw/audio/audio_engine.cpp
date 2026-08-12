@@ -23,10 +23,9 @@ constexpr std::uint32_t dma_irq_priority = 1U;
 // fixed DTCM coefficient bank and 8 KiB stack remain untouched; each completed
 // buffer is explicitly cleaned before eDMA reads it.
 alignas(32) std::uint8_t dma_audio[audio::AudioEngine::dma_buffer_count][1536]{};
-// The largest currently advertised block is 192 output frames at 48 kHz:
-// 47 source advances plus the FIR's 64-frame lookahead.
-constexpr std::size_t maximum_upsampler_input_frames =
-    audio::PolyphaseUpsampler::taps_per_phase / 2U + 48U;
+// Exact 4x conversion consumes 44 or 48 source frames per approximately
+// one-millisecond output transfer. Long FIR history lives inside the FFT FDL.
+constexpr std::size_t maximum_upsampler_input_frames = 48U;
 __attribute__((section(".dma"), aligned(32)))
 std::uint8_t upsampler_input[maximum_upsampler_input_frames * 8U]{};
 std::uint8_t dma_index = 0U;
