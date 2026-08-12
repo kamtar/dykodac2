@@ -13,8 +13,16 @@ enum class Register : std::uint8_t {
 };
 inline constexpr std::uint8_t write_command = 0x98U;
 
-enum class Control2 : std::uint8_t { LegacyBootstrap = 0x10U };
-enum class Control7 : std::uint8_t { LegacyBootstrap = 0xB0U };
+enum class Control2 : std::uint8_t {
+    // I2S (DIF=001) + quad-speed PCM (FM=10), for 192 kHz at 24.576 MHz MCLK.
+    QuadSpeedI2s = 0x12U,
+};
+enum class Control7 : std::uint8_t {
+    // Soft ramp and fast roll-off interpolation. The CS4398 has no external
+    // digital-filter bypass; the external filter is the board's analog stage.
+    LegacyBootstrap = 0xB0U,
+    FastRollOff = 0xB0U,
+};
 enum class MuteControl : std::uint8_t {
     // Keep PCM/DSD auto-mute disabled. The audio engine continuously supplies
     // digital zero while the host is idle, so DAC silence detection must not

@@ -15,10 +15,12 @@ PID = 0xD2A3
 COMMAND = b"DYKO-DIAG-GET-01"
 EVENT_COMMAND = b"DYKO-EVENT-GET-1"
 DMA_COMMAND = b"DYKO-DMA-GET-001"
+PERF_COMMAND = b"DYKO-PERF-GET-01"
 REPORT = struct.Struct("<IBBH9I5H10B")
 EVENT_HEADER = struct.Struct("<IBBBB")
 EVENT_RECORD = struct.Struct("<BBHI")
 DMA_REPORT = struct.Struct("<IBBH11I6H")
+PERF_REPORT = struct.Struct("<IBBHIIQIIIBBHII16x")
 
 APP_STATES = [
     "BootSafe", "Initializing", "IdleMuted", "PreparingStream", "Playing",
@@ -37,7 +39,7 @@ STOP_REASONS = [
 EVENTS = [
     "None", "Mounted", "Detached", "Suspended", "Resumed", "Start", "Stop",
     "Rate", "Controls", "Diagnostics", "EventTrace", "BootloaderArm",
-    "DmaDiagnostics",
+    "DmaDiagnostics", "UpdaterArm", "RefillTiming",
 ]
 CONTROLS = ["None", "SampleRate", "Mute", "Volume", "InterfaceAlternate"]
 
@@ -65,6 +67,12 @@ try:
     raw = query(COMMAND)
     event_raw = query(EVENT_COMMAND)
     dma_raw = query(DMA_COMMAND)
+    try:
+        perf_raw = query(PERF_COMMAND)
+    except OSError:
+        # Firmware before refill instrumentation does not recognize this
+        # command. Keep the rest of the diagnostic snapshot useful.
+        perf_raw = None
 finally:
     device.close()
 
@@ -167,10 +175,8 @@ if dma_es:
     assessment = "eDMA_error"
 elif dma_int & 1 or (tcd_csr & 0x80):
     assessment = "major_loop_completed_check_IRQ_path"
-elif biter and citer < biter:
-    assessment = "DMA_moved_data_then_stalled_check_SAI_clock_and_FIFO"
 elif request_path_enabled:
-    assessment = "request_path_enabled_but_no_minor_loop_service"
+    assessment = "active_snapshot_use_completion_deltas_for_progress"
 else:
     assessment = "DMA_request_path_not_fully_enabled"
 
@@ -191,5 +197,32 @@ decoded["sai_edma"] = {
             "tcr2_hex": f"0x{sai_tcr2:08x}", "channel0_enabled": bool(sai_tcr3 & 0x10000),
             "fifo_read_pointer": sai_tfr0 & 0x3F, "fifo_write_pointer": (sai_tfr0 >> 16) & 0x3F},
 }
+
+if perf_raw is not None:
+    (
+        perf_magic, perf_version, perf_size, perf_sequence, perf_captured_ms,
+        refill_count, refill_total_cycles, refill_maximum_cycles,
+        refill_last_cycles, core_clock_hz, maximum_pending_refills,
+        dma_buffer_count, _reserved0, coalesced_callbacks, queue_drains,
+    ) = PERF_REPORT.unpack(perf_raw)
+    if perf_magic != 0x46524550 or perf_version != 1 or perf_size != PERF_REPORT.size:
+        sys.exit("Unrecognized refill timing report")
+    average_cycles = refill_total_cycles / refill_count if refill_count else 0.0
+    decoded["refill_performance"] = {
+        "sequence": perf_sequence,
+        "captured_ms": perf_captured_ms,
+        "refill_count": refill_count,
+        "average_cycles": average_cycles,
+        "maximum_cycles": refill_maximum_cycles,
+        "last_cycles": refill_last_cycles,
+        "core_clock_hz": core_clock_hz,
+        "average_capacity_blocks_per_second": core_clock_hz / average_cycles if average_cycles else 0.0,
+        "average_cpu_percent_at_1000_blocks_per_second":
+            average_cycles * 100000.0 / core_clock_hz if core_clock_hz else 0.0,
+        "maximum_pending_refills": maximum_pending_refills,
+        "dma_buffer_count": dma_buffer_count,
+        "coalesced_callbacks": coalesced_callbacks,
+        "queue_drains": queue_drains,
+    }
 
 print(json.dumps(decoded, indent=2))

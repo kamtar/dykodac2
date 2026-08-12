@@ -22,20 +22,30 @@ measured. “Unknown” is deliberate; it must not be filled from inference.
 | `D_DAC_CS` | GPIO_12 / GPIO1_IO12 | Same | Unknown | High inactive |
 | `D_DAC_RST` | GPIO_13 / GPIO1_IO13 | Same | Unknown | Low asserted |
 
-## Legacy DAC bootstrap transactions
+## Current DAC bootstrap transactions
 
-At 2 MHz FlexIO SPI, the prototype sends these three-byte writes after reset:
+After holding reset for 10 ms, firmware waits 1 us after releasing reset and
+sends these three-byte writes at 6 MHz FlexIO SPI:
 
 1. `98 08 C0`
-2. `98 02 10`
+2. `98 02 12`
 3. `98 07 B0`
 4. `98 08 40`
+5. `98 04 18`
 
-The redesign then writes `98 04 D8`: register 04h retains the default PCM/DSD
-auto-mute bits cleared and explicitly sets both channel-mute bits. This safety write is
-additional to, and deliberately does not alter, the known-working sequence.
+The first write enables the control port while keeping the DAC powered down;
+it is completed before the approximately 218-MCLK-cycle stand-alone power-up
+sequence. The second write selects quad-speed I2S. The final write disables
+automatic silence muting and explicitly mutes both channels until stream
+startup is stable.
 
-Register semantics still require confirmation against the exact DAC datasheet.
+The software output stage now converts the USB 44.1/48-kHz input to fixed
+192-kHz PCM. The CS4398 is placed in quad-speed I2S mode (`98 02 12`) using
+the existing 24.576-MHz MCLK (128 x 192 kHz), and register 07 remains the
+fast-roll-off internal interpolation selection (`98 07 B0`). The CS4398 does
+not provide an external digital-filter bypass; “external filter” therefore
+means the board's analog output filter, not a bypass of the DAC's digital
+interpolator.
 
 ## Verified bring-up record (2026-07-19)
 
@@ -46,7 +56,7 @@ once per second. Full GPIO initialization before `BOARD_InitBootClocks()` was
 observed to stall clock setup; only GPIO_01 (green on the assembled board) may be initialized before it
 until the responsible signal is isolated. Preserve `__MCUXPRESSO` for VTOR.
 
-## Verified DAC SPI and SAI measurements (2026-07-19)
+## Historical verified DAC SPI and SAI measurements (2026-07-19)
 
 The diagnostic image passed the second hardware gate. FlexIO SPI operates at
 2 MHz on the preserved legacy pins and produced `98 08 C0`, `98 02 10`,

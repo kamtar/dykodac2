@@ -22,6 +22,11 @@ struct FormatConfig {
     std::uint16_t dma_frames_per_transfer;
     std::uint32_t feedback_nominal_16_16;
     std::uint8_t dac_mode;
+    // USB/input format above remains host-selectable. The DAC is fed by the
+    // fixed-rate output below after the software polyphase stage.
+    std::uint32_t output_sample_rate_hz;
+    std::uint32_t output_oscillator_hz;
+    ClockFamily output_family;
 };
 
 inline constexpr std::uint32_t bytes_per_frame(const AudioFormat& f) noexcept {

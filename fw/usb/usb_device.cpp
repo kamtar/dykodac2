@@ -18,6 +18,9 @@ usb::UsbDevice* instance = nullptr;
 audio::StreamBuffer* stream_buffer = nullptr;
 audio::FeedbackController* feedback_controller = nullptr;
 alignas(32) std::uint8_t packet[DYKODAC_USB_HS_MAX_PACKET];
+// DMA completion uses priority 1.  USB remains high priority but must allow
+// the very short DMA ISR to keep the two-entry audio chain populated.
+constexpr std::uint32_t usb_irq_priority = 2U;
 }
 
 namespace usb {
@@ -29,7 +32,9 @@ bool UsbDevice::initialize(audio::StreamBuffer& stream, audio::FeedbackControlle
     USBPHY->CTRL |= USBPHY_CTRL_SET_ENUTMILEVEL2_MASK | USBPHY_CTRL_SET_ENUTMILEVEL3_MASK;
     USBPHY->PWD = 0U;
     tusb_rhport_init_t init{TUSB_ROLE_DEVICE, TUSB_SPEED_HIGH};
-    return tusb_init(0U, &init);
+    const bool initialized = tusb_init(0U, &init);
+    if (initialized) NVIC_SetPriority(USB_OTG1_IRQn, usb_irq_priority);
+    return initialized;
 }
 void UsbDevice::task() noexcept {
     tud_task();
@@ -40,6 +45,8 @@ void UsbDevice::task() noexcept {
              tud_hid_report(0U, &event_trace_, sizeof(event_trace_))) pending_report_ = PendingReport::None;
     else if (pending_report_ == PendingReport::DmaDiagnostics &&
              tud_hid_report(0U, &dma_diagnostics_, sizeof(dma_diagnostics_))) pending_report_ = PendingReport::None;
+    else if (pending_report_ == PendingReport::RefillTiming &&
+             tud_hid_report(0U, &refill_timing_, sizeof(refill_timing_))) pending_report_ = PendingReport::None;
 }
 EventRecord UsbDevice::take_event() noexcept {
     if (event_count_ == 0U) return {};
@@ -51,7 +58,7 @@ EventRecord UsbDevice::take_event() noexcept {
 bool UsbDevice::post_event(EventRecord event) noexcept {
     event.reserved = static_cast<std::uint16_t>(board::MonotonicTimer::now_ms());
     if (event.event != Event::Diagnostics && event.event != Event::EventTrace &&
-        event.event != Event::DmaDiagnostics) {
+        event.event != Event::DmaDiagnostics && event.event != Event::RefillTiming) {
         event_history_[event_history_write_] = event;
         event_history_write_ = static_cast<std::uint8_t>((event_history_write_ + 1U) % event_history_.size());
         if (event_history_count_ < event_history_.size()) ++event_history_count_;
@@ -112,6 +119,22 @@ bool UsbDevice::send_dma_diagnostics() noexcept {
         return true;
     }
     pending_report_ = PendingReport::DmaDiagnostics;
+    return false;
+}
+void UsbDevice::update_refill_timing(const maintenance::RefillTimingReport& report) noexcept {
+    const std::uint16_t next_sequence = static_cast<std::uint16_t>(refill_timing_.sequence + 1U);
+    refill_timing_ = report;
+    refill_timing_.magic = maintenance::refill_timing_magic;
+    refill_timing_.version = 1U;
+    refill_timing_.size = static_cast<std::uint8_t>(sizeof(refill_timing_));
+    refill_timing_.sequence = next_sequence;
+}
+bool UsbDevice::send_refill_timing() noexcept {
+    if (tud_hid_ready() && tud_hid_report(0U, &refill_timing_, sizeof(refill_timing_))) {
+        pending_report_ = PendingReport::None;
+        return true;
+    }
+    pending_report_ = PendingReport::RefillTiming;
     return false;
 }
 } // namespace usb
@@ -251,4 +274,5 @@ extern "C" void tud_hid_set_report_cb(std::uint8_t, std::uint8_t,
     else if (usb::maintenance::is_get_diagnostics(buffer, size)) instance->post_event(usb::Event::Diagnostics);
     else if (usb::maintenance::is_get_events(buffer, size)) instance->post_event(usb::Event::EventTrace);
     else if (usb::maintenance::is_get_dma_diagnostics(buffer, size)) instance->post_event(usb::Event::DmaDiagnostics);
+    else if (usb::maintenance::is_get_refill_timing(buffer, size)) instance->post_event(usb::Event::RefillTiming);
 }

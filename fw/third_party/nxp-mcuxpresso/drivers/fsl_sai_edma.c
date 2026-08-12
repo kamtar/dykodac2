@@ -98,6 +98,25 @@ static void SAI_TxEDMACallback(edma_handle_t *handle, void *userData, bool done,
     sai_edma_handle_t *saiHandle          = privHandle->handle;
     status_t status                       = kStatus_SAI_TxBusy;
 
+    /* Preserve the eDMA completion count for the application callback. The
+     * original wrapper discarded it, which makes loop-buffer ownership
+     * ambiguous if several major loops are reported by one IRQ. */
+    if ((saiHandle->state == (uint32_t)kSAI_BusyLoopTransfer) && (tcds == 0U))
+    {
+        /* The generic eDMA queue accounting is modulo tcdSize. In a permanent
+         * loop, returning to the same descriptor means one whole loop retired,
+         * not zero transfers. */
+        tcds = SAI_XFER_QUEUE_SIZE;
+    }
+    if (saiHandle->state == (uint32_t)kSAI_BusyLoopTransfer)
+    {
+        /* EDMA_HandleIRQ's signed queue-depth field is only meaningful for
+         * dynamically submitted TCDs. Prevent it underflowing while this
+         * immutable ring runs indefinitely. */
+        handle->tcdUsed = 0;
+    }
+    saiHandle->completedTransferCount = (uint8_t)tcds;
+
     if (saiHandle->state != (uint32_t)kSAI_BusyLoopTransfer)
     {
         if (saiHandle->queueDriver + tcds > (uint32_t)SAI_XFER_QUEUE_SIZE)
@@ -135,6 +154,16 @@ static void SAI_RxEDMACallback(edma_handle_t *handle, void *userData, bool done,
     sai_edma_private_handle_t *privHandle = (sai_edma_private_handle_t *)userData;
     sai_edma_handle_t *saiHandle          = privHandle->handle;
     status_t status                       = kStatus_SAI_RxBusy;
+
+    if ((saiHandle->state == (uint32_t)kSAI_BusyLoopTransfer) && (tcds == 0U))
+    {
+        tcds = SAI_XFER_QUEUE_SIZE;
+    }
+    if (saiHandle->state == (uint32_t)kSAI_BusyLoopTransfer)
+    {
+        handle->tcdUsed = 0;
+    }
+    saiHandle->completedTransferCount = (uint8_t)tcds;
 
     if (saiHandle->state != (uint32_t)kSAI_BusyLoopTransfer)
     {

@@ -7,7 +7,7 @@
 #include <array>
 
 namespace usb {
-enum class Event : std::uint8_t { None, Mounted, Detached, Suspended, Resumed, Start, Stop, Rate, Controls, Diagnostics, EventTrace, BootloaderArm, DmaDiagnostics, UpdaterArm };
+enum class Event : std::uint8_t { None, Mounted, Detached, Suspended, Resumed, Start, Stop, Rate, Controls, Diagnostics, EventTrace, BootloaderArm, DmaDiagnostics, UpdaterArm, RefillTiming };
 enum class Control : std::uint8_t { None, SampleRate, Mute, Volume, InterfaceAlternate };
 struct EventRecord {
     Event event{Event::None};
@@ -48,6 +48,8 @@ public:
     bool send_event_trace() noexcept;
     void update_dma_diagnostics(const maintenance::DmaDiagnosticReport& report) noexcept;
     bool send_dma_diagnostics() noexcept;
+    void update_refill_timing(const maintenance::RefillTimingReport& report) noexcept;
+    bool send_refill_timing() noexcept;
     std::uint32_t dropped_packets() const noexcept { return dropped_packets_; }
     std::uint32_t dropped_events() const noexcept { return dropped_events_; }
     std::uint32_t packet_count() const noexcept { return packet_count_; }
@@ -75,7 +77,7 @@ public: // callback-facing state; only TinyUSB callbacks in usb_device.cpp write
     std::uint32_t padding_errors_{0U};
     std::uint32_t dropped_packets_{0U};
     std::uint32_t dropped_events_{0U};
-    enum class PendingReport : std::uint8_t { None, Diagnostics, EventTrace, DmaDiagnostics };
+    enum class PendingReport : std::uint8_t { None, Diagnostics, EventTrace, DmaDiagnostics, RefillTiming };
     PendingReport pending_report_{PendingReport::None};
     std::array<EventRecord, 7U> event_history_{};
     std::uint8_t event_history_write_{0U};
@@ -83,5 +85,6 @@ public: // callback-facing state; only TinyUSB callbacks in usb_device.cpp write
     maintenance::DiagnosticReport diagnostics_{};
     EventTraceReport event_trace_{};
     maintenance::DmaDiagnosticReport dma_diagnostics_{};
+    maintenance::RefillTimingReport refill_timing_{};
 };
 } // namespace usb

@@ -136,7 +136,9 @@ void run_start(Runtime& r, std::uint32_t now) {
     switch (r.step) {
     case StartStep::RelayRelease:
         if (!reached(now, r.deadline)) break;
-        r.clocks.select(r.desired->family);
+        // The USB input family may be 44.1/48 kHz, but the DAC clock is fixed
+        // at the 48-kHz oscillator family for the 192-kHz output stage.
+        r.clocks.select(r.desired->output_family);
         r.deadline = now + config::board::oscillator_settle_us / 1'000U;
         r.step = StartStep::ClockSettle;
         break;
@@ -205,10 +207,10 @@ void update_leds(Runtime& r, std::uint32_t now) {
         return;
     }
 
-    // As-built front-panel meaning: green is the 44.1-kHz family and red is
-    // the 48-kHz family. Only the LED for the physically selected oscillator
-    // is used, except that a fault flashes both LEDs.
-    const bool family_48k = r.clocks.selected() == audio::ClockFamily::Family48k;
+    // Front-panel meaning follows the format requested by the PC: green is
+    // the 44.1-kHz family and red is the 48-kHz family. The DAC oscillator is
+    // fixed to the 48-kHz family by the 192-kHz output stage.
+    const bool family_48k = r.desired && r.desired->family == audio::ClockFamily::Family48k;
     bool on = true;
     if (!r.mounted) {
         // With no PC connected, give a short heartbeat once every five seconds.
@@ -218,7 +220,7 @@ void update_leds(Runtime& r, std::uint32_t now) {
         // stream is active. Blink more slowly than the cold/muted idle state.
         on = ((now / 1'500U) & 1U) != 0U;
     } else if (!playing) {
-        // Enumerated but idle: slowly blink the selected oscillator.
+        // Enumerated but idle: slowly blink the PC-requested family.
         on = ((now / 500U) & 1U) != 0U;
     }
     board::target::set_red_led(on && family_48k);
@@ -297,6 +299,9 @@ int main() {
     for (;;) {
         const std::uint32_t now = board::MonotonicTimer::now_ms();
         runtime.dac.poll(now);
+        // A DMA completion only publishes a refill request. Regenerate retired
+        // blocks here while the circular DMA ring keeps transmitting.
+        runtime.engine.service();
         if (!runtime.usb_ready && runtime.dac.ready_muted()) {
             runtime.desired = &audio::supported_format(0U);
             runtime.active = runtime.desired;
@@ -388,6 +393,23 @@ int main() {
             report.tcd_csr = source.tcd_csr;
             runtime.usb.update_dma_diagnostics(report);
             runtime.usb.send_dma_diagnostics();
+            break;
+        }
+        case usb::Event::RefillTiming: {
+            const auto& source = runtime.engine.refill_timing();
+            usb::maintenance::RefillTimingReport report{};
+            report.captured_ms = now;
+            report.refill_count = source.count;
+            report.refill_total_cycles = source.total_cycles;
+            report.refill_maximum_cycles = source.maximum_cycles;
+            report.refill_last_cycles = source.last_cycles;
+            report.core_clock_hz = SystemCoreClock;
+            report.maximum_pending_refills = source.maximum_pending;
+            report.dma_buffer_count = audio::AudioEngine::dma_buffer_count;
+            report.coalesced_callbacks = source.coalesced_callbacks;
+            report.queue_drains = source.queue_drains;
+            runtime.usb.update_refill_timing(report);
+            runtime.usb.send_refill_timing();
             break;
         }
         case usb::Event::BootloaderArm:

@@ -49,6 +49,7 @@ struct sai_edma_handle
     size_t transferSize[SAI_XFER_QUEUE_SIZE];                     /*!< Data bytes need to transfer */
     volatile uint8_t queueUser;                                   /*!< Index for user to queue transfer. */
     volatile uint8_t queueDriver; /*!< Index for driver to get the transfer data and size */
+    volatile uint8_t completedTransferCount; /*!< TCDs retired by the most recent eDMA callback. */
 };
 
 /*******************************************************************************

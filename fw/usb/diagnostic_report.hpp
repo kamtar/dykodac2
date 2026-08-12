@@ -75,4 +75,25 @@ struct DmaDiagnosticReport {
 };
 static_assert(sizeof(DmaDiagnosticReport) == 64U, "DMA diagnostic report must fit HID packet");
 
+inline constexpr std::uint32_t refill_timing_magic = 0x46524550U; // "PERF"
+struct RefillTimingReport {
+    std::uint32_t magic{refill_timing_magic};
+    std::uint8_t version{1U};
+    std::uint8_t size{64U};
+    std::uint16_t sequence{0U};
+    std::uint32_t captured_ms{0U};
+    std::uint32_t refill_count{0U};
+    std::uint64_t refill_total_cycles{0U};
+    std::uint32_t refill_maximum_cycles{0U};
+    std::uint32_t refill_last_cycles{0U};
+    std::uint32_t core_clock_hz{0U};
+    std::uint8_t maximum_pending_refills{0U};
+    std::uint8_t dma_buffer_count{0U};
+    std::uint16_t reserved0{0U};
+    std::uint32_t coalesced_callbacks{0U};
+    std::uint32_t queue_drains{0U};
+    std::uint8_t reserved[16]{};
+};
+static_assert(sizeof(RefillTimingReport) == 64U, "refill timing report must fit HID packet");
+
 } // namespace usb::maintenance

@@ -21,9 +21,11 @@ local tinyusb_core = { "third_party/tinyusb/src/tusb.c", "third_party/tinyusb/sr
 local function target_common()
     includedirs(common_includes)
     defines(common_defines)
-    buildoptions { table.unpack(cpu_options), "-ffunction-sections", "-fdata-sections", "-ffreestanding",
+    buildoptions(cpu_options)
+    buildoptions { "-ffunction-sections", "-fdata-sections", "-ffreestanding",
         "-fno-exceptions", "-fstack-usage", "-Wall", "-Wextra", "-Wconversion", "-Wshadow", "-Wundef" }
-    linkoptions { table.unpack(cpu_options), "-nostartfiles", "--specs=nano.specs", "--specs=nosys.specs",
+    linkoptions(cpu_options)
+    linkoptions { "-nostartfiles", "--specs=nano.specs", "--specs=nosys.specs",
         "-Wl,--gc-sections", "-Wl,--cref", "-Wl,--print-memory-usage" }
     filter "configurations:HostTest" flags { "ExcludeFromBuild" }
     filter "files:**.cpp" buildoptions { "-fno-rtti", "-fno-threadsafe-statics", "-fno-use-cxa-atexit" }
@@ -34,7 +36,7 @@ end
 
 local app_sources = {
     "app/app_controller.cpp", "audio/audio_engine.cpp", "audio/stream_buffer.cpp", "audio/feedback_controller.cpp",
-    "audio/sample_rate.cpp", "board/clock_manager.cpp", "board/monotonic_timer.cpp", "board/output_relay.cpp",
+    "audio/sample_rate.cpp", "audio/polyphase_upsampler.cpp", "board/clock_manager.cpp", "board/monotonic_timer.cpp", "board/output_relay.cpp",
     "board/target_board.cpp", "devices/dac.cpp", "platform/nxp/main.cpp", "platform/nxp/mpu_config.cpp",
     "platform/nxp/rom_bootloader.cpp", "platform/nxp/flexio_dac_transport.cpp", "platform/nxp/boot_control.cpp",
     "platform/nxp/update_layout.cpp", "usb/usb_device.cpp", "usb/usb_descriptors.cpp",
@@ -80,7 +82,7 @@ project "dykodac2_boot"
 project "dykodac2_host_tests"
     kind "ConsoleApp"
     targetdir "build/gmake2/bin/%{cfg.buildcfg}" objdir "build/gmake2/obj/%{cfg.buildcfg}/%{prj.name}"
-    files { "app/app_controller.cpp", "audio/sample_rate.cpp", "audio/stream_buffer.cpp", "audio/feedback_controller.cpp",
+    files { "app/app_controller.cpp", "audio/sample_rate.cpp", "audio/polyphase_upsampler.cpp", "audio/stream_buffer.cpp", "audio/feedback_controller.cpp",
         "devices/dac.cpp", "platform/nxp/update_layout.cpp", "platform/nxp/sha256.cpp",
         "usb/usb_event_queue_host.cpp", "tests/host/**.cpp" }
     includedirs { "." }

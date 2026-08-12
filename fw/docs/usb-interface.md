@@ -79,21 +79,22 @@ py tools/watch_dma_diagnostics.py
 
 ## Indicators
 
-- Before enumeration: the selected oscillator LED pulses for 100 ms every
+- Before enumeration: the default requested-family LED pulses for 100 ms every
   5 seconds. The power-on default is the green 44.1-kHz-family LED.
-- Enumerated and idle: only the selected oscillator LED toggles every 500 ms.
-- Playing: the selected oscillator LED is solid (green for 44.1 kHz, red for
+- Enumerated and idle: only the PC-requested family LED toggles every 500 ms.
+- Playing: the PC-requested family LED is solid (green for 44.1 kHz, red for
   48 kHz).
 - Fault: both LEDs toggle every 125 ms and override oscillator indication.
 
 ## Expected hardware signals
 
-At 44.1 kHz, expect 22.5792 MHz MCLK, 2.8224 MHz BCLK, and 44.1 kHz LRCLK.
-At 48 kHz, expect 24.576 MHz MCLK, 3.072 MHz BCLK, and 48 kHz LRCLK. SAI is
-stereo I2S with 24 valid bits in 32-bit slots. At boot the CS4398 reset is held
-for 10 ms, then the 2 MHz SPI sequence is `98 08 C0`, `98 02 10`, `98 07 B0`,
-`98 08 40`, `98 04 D8`. Stream preparation adds format/mute/attenuation writes;
-unmute is `98 04 D0`. Reset is asserted again on DAC bus failure.
+For either USB input rate, expect the fixed DAC-output clocks: 24.576 MHz MCLK,
+12.288 MHz BCLK, and 192 kHz LRCLK. SAI is stereo I2S with 24 valid bits in
+32-bit slots. At boot the CS4398 reset is held for 10 ms; after release, the
+6 MHz SPI sequence is `98 08 C0`, `98 02 12`, `98 07 B0`, `98 08 40`,
+`98 04 18`. Stream preparation repeats the quad-speed format write and applies
+mute/attenuation; unmute is `98 04 00`. Reset is asserted again on DAC bus
+failure.
 
 ## First-flash validation
 

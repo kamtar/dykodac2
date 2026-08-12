@@ -7,6 +7,7 @@ class FlexioDacTransport final : public devices::DacTransport {
 public:
     void initialize() noexcept override;
     void set_reset(bool asserted) noexcept override;
+    void wait_after_reset_release() noexcept override;
     void set_chip_select(bool asserted) noexcept override;
     bool transfer(const devices::DacCommand& command) noexcept override;
 };

@@ -13,10 +13,21 @@ extern "C" {
 
 namespace {
 constexpr std::uint32_t dma_channel = 0U;
-__attribute__((section(".dma"), aligned(32))) std::uint8_t dma_audio[2][384]{};
+static_assert(audio::AudioEngine::dma_buffer_count == SAI_XFER_QUEUE_SIZE,
+              "audio buffer count must fit the SAI loop TCD pool");
+// DMA completion must be able to preempt USB. The four-entry circular TCD ring
+// keeps running independently while main context regenerates retired buffers.
+constexpr std::uint32_t dma_irq_priority = 1U;
+// Four buffers keep 4 ms of output queued. They live in cacheable OCRAM so the
+// fixed DTCM coefficient bank and 8 KiB stack remain untouched; each completed
+// buffer is explicitly cleaned before eDMA reads it.
+alignas(32) std::uint8_t dma_audio[audio::AudioEngine::dma_buffer_count][1536]{};
+__attribute__((section(".dma"), aligned(32))) std::uint8_t upsampler_input[1024]{};
 std::uint8_t dma_index = 0U;
 edma_handle_t dma_handle{};
-sai_edma_handle_t sai_handle{};
+// The SAI loop driver uses this handle's embedded TCD pool for its permanent
+// scatter/gather ring. Keep it in DMA-visible, non-cacheable DTCM.
+__attribute__((section(".dma"), aligned(32))) sai_edma_handle_t sai_handle{};
 
 constexpr std::size_t pcm_bytes_per_frame = 8U;
 constexpr std::size_t fade_frames = 32U;
@@ -46,30 +57,70 @@ void fade(std::uint8_t* data, std::size_t first_frame, std::size_t frames, bool 
     }
 }
 
-void dma_callback(I2S_Type*, sai_edma_handle_t*, status_t status, void* user_data) {
+void dma_callback(I2S_Type*, sai_edma_handle_t* handle, status_t status, void* user_data) {
     const bool completed = status == kStatus_SAI_TxBusy || status == kStatus_SAI_TxIdle;
-    static_cast<audio::AudioEngine*>(user_data)->on_dma_complete(completed);
+    // The eDMA driver can retire multiple TCDs before servicing one IRQ. The
+    // local SAI wrapper preserves that count for circular-buffer ownership.
+    static_cast<audio::AudioEngine*>(user_data)->on_dma_complete(
+        completed, status == kStatus_SAI_TxIdle, handle->completedTransferCount);
 }
 }
 
 namespace audio {
-bool AudioEngine::submit_silence() noexcept {
+void AudioEngine::reset_refill_timing() noexcept {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0U;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    refill_timing_ = {};
+}
+
+void AudioEngine::record_refill_cycles(std::uint32_t cycles) noexcept {
+    ++refill_timing_.count;
+    refill_timing_.total_cycles += cycles;
+    refill_timing_.last_cycles = cycles;
+    if (cycles > refill_timing_.maximum_cycles) refill_timing_.maximum_cycles = cycles;
+}
+
+std::uint8_t* AudioEngine::prepare_next_buffer() noexcept {
     auto* buffer = dma_audio[dma_index];
-    dma_index ^= 1U;
+    dma_index = static_cast<std::uint8_t>(
+        (dma_index + 1U) & (audio::AudioEngine::dma_buffer_count - 1U));
     if (stream_) {
-        const std::size_t read = stream_->pop(buffer, transfer_bytes_);
-        if (read != transfer_bytes_) {
+        const std::size_t input_frames = upsampler_.input_frames_needed(transfer_frames_);
+        const std::size_t input_bytes = input_frames * pcm_bytes_per_frame;
+        const std::size_t read = stream_->pop(upsampler_input, input_bytes);
+        const std::size_t produced_input = read / pcm_bytes_per_frame;
+        const std::size_t produced = upsampler_.process(upsampler_input, produced_input,
+                                                        buffer, transfer_frames_);
+        if (produced < transfer_frames_)
+            std::memset(buffer + produced * pcm_bytes_per_frame, 0,
+                        (transfer_frames_ - produced) * pcm_bytes_per_frame);
+        if (read != input_bytes || produced != transfer_frames_) {
             ++underruns_;
-            conceal_underrun(buffer, read);
+            conceal_underrun(buffer, produced * pcm_bytes_per_frame);
         } else if (concealment_active_) {
-            fade(buffer, 0U, fade_frames < transfer_bytes_ / pcm_bytes_per_frame ? fade_frames : transfer_bytes_ / pcm_bytes_per_frame, true);
+            fade(buffer, 0U, fade_frames < transfer_frames_ ? fade_frames : transfer_frames_, true);
             concealment_active_ = false;
         }
     } else {
-        std::memset(buffer, 0, transfer_bytes_);
+        const std::size_t input_frames = upsampler_.input_frames_needed(transfer_frames_);
+        std::memset(upsampler_input, 0, input_frames * pcm_bytes_per_frame);
+        const std::size_t produced = upsampler_.process(upsampler_input, input_frames,
+                                                        buffer, transfer_frames_);
+        if (produced != transfer_frames_)
+            std::memset(buffer + produced * pcm_bytes_per_frame, 0,
+                        (transfer_frames_ - produced) * pcm_bytes_per_frame);
     }
-    sai_transfer_t transfer{buffer, transfer_bytes_};
-    return SAI_TransferSendEDMA(SAI1, &sai_handle, &transfer) == kStatus_Success;
+    SCB_CleanDCache_by_Addr(reinterpret_cast<std::uint32_t*>(buffer),
+                            static_cast<std::int32_t>(transfer_bytes_));
+    return buffer;
+}
+
+std::uint8_t* AudioEngine::timed_prepare_next_buffer() noexcept {
+    const std::uint32_t started = DWT->CYCCNT;
+    auto* const result = prepare_next_buffer();
+    record_refill_cycles(DWT->CYCCNT - started);
+    return result;
 }
 
 bool AudioEngine::start_silence(const FormatConfig& config) noexcept {
@@ -89,6 +140,8 @@ bool AudioEngine::start(const FormatConfig& config, StreamBuffer& stream) noexce
     concealment_active_ = false;
     transfer_bytes_ = static_cast<std::size_t>(config.dma_frames_per_transfer) * bytes_per_frame(config.format);
     if (transfer_bytes_ > sizeof(dma_audio[0])) return false;
+    transfer_frames_ = config.dma_frames_per_transfer;
+    if (!upsampler_.configure(config.format.sample_rate_hz)) return false;
     board::target::initialize_audio_pins();
     IOMUXC_SetSaiMClkClockSource(IOMUXC_GPR, kIOMUXC_GPR_SAI1MClk1Sel, 3U);
 
@@ -102,7 +155,7 @@ bool AudioEngine::start(const FormatConfig& config, StreamBuffer& stream) noexce
     edma_config_t dma_config{};
     EDMA_GetDefaultConfig(&dma_config);
     EDMA_Init(DMA0, &dma_config);
-    NVIC_SetPriority(DMA0_IRQn, 25U);
+    NVIC_SetPriority(DMA0_IRQn, dma_irq_priority);
     EDMA_CreateHandle(&dma_handle, DMA0, dma_channel);
 
     SAI_TransferTxCreateHandleEDMA(SAI1, &sai_handle, dma_callback, this, &dma_handle);
@@ -113,18 +166,46 @@ bool AudioEngine::start(const FormatConfig& config, StreamBuffer& stream) noexce
     sai_config.bitClock.bclkSource = kSAI_BclkSourceMclkDiv;
     sai_config.fifo.fifoWatermark = static_cast<std::uint8_t>(FSL_FEATURE_SAI_FIFO_COUNT - 1U);
     SAI_TransferTxSetConfigEDMA(SAI1, &sai_handle, &sai_config);
-    SAI_TxSetBitClockRate(SAI1, config.oscillator_hz, config.format.sample_rate_hz,
+    SAI_TxSetBitClockRate(SAI1, config.output_oscillator_hz, config.output_sample_rate_hz,
                           config.format.container_bits, config.format.channels);
 
     dma_completions_ = 0U;
     dma_errors_ = 0U;
     underruns_ = 0U;
-    // The prototype keeps one transfer outstanding and queues its successor
-    // from the completion callback. Submitting two here enables dynamic
-    // scatter/gather, whose next TCD lives in cacheable OCRAM.
+    reset_refill_timing();
+    // Build a permanent four-entry hardware TCD ring. Unlike the transactional
+    // queue, it cannot stop between a completion IRQ and its software refill.
+    refill_requests_ = 0U;
+    dma_index = 0U;
+    sai_transfer_t loop_transfers[AudioEngine::dma_buffer_count]{};
+    for (std::size_t index = 0U; index < AudioEngine::dma_buffer_count; ++index) {
+        loop_transfers[index].data = timed_prepare_next_buffer();
+        loop_transfers[index].dataSize = transfer_bytes_;
+    }
     running_ = true;
-    if (!submit_silence()) running_ = false;
-    return running_;
+    if (SAI_TransferSendLoopEDMA(SAI1, &sai_handle, loop_transfers,
+                                 AudioEngine::dma_buffer_count) != kStatus_Success) {
+        stop();
+        return false;
+    }
+    return true;
+}
+
+bool AudioEngine::take_refill_request() noexcept {
+    const std::uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    __DMB();
+    const bool pending = refill_requests_ != 0U;
+    if (pending) --refill_requests_;
+    __DMB();
+    if (primask == 0U) __enable_irq();
+    return pending;
+}
+
+void AudioEngine::service() noexcept {
+    while (running_ && take_refill_request()) {
+        (void)timed_prepare_next_buffer();
+    }
 }
 
 void AudioEngine::conceal_underrun(std::uint8_t* buffer, std::size_t received_bytes) noexcept {
@@ -144,6 +225,7 @@ void AudioEngine::conceal_underrun(std::uint8_t* buffer, std::size_t received_by
 void AudioEngine::stop() noexcept {
     if (!running_) return;
     running_ = false;
+    refill_requests_ = 0U;
     SAI_TransferAbortSendEDMA(SAI1, &sai_handle);
     SAI_Deinit(SAI1);
     DMAMUX_DisableChannel(DMAMUX, dma_channel);
@@ -170,19 +252,28 @@ void AudioEngine::capture_dma_diagnostics(std::uint32_t now_ms) noexcept {
     dma_diagnostics_.tcd_csr = tcd.CSR;
 }
 
-void AudioEngine::on_dma_complete(bool success) noexcept {
+void AudioEngine::on_dma_complete(bool success, bool queue_empty, std::uint8_t completed) noexcept {
     // Abort can race with an already-pending completion interrupt. Once stop
     // publishes running_=false, that stale callback must not refill/requeue.
     if (!running_) return;
     if (!success) {
         ++dma_errors_;
-        running_ = false;
+        // Leave running_ set until the main state machine observes the error
+        // and calls stop(), which aborts and deinitializes the active path.
         return;
     }
-    ++dma_completions_;
-    if (!submit_silence()) {
+    if (completed == 0U) {
         ++dma_errors_;
-        running_ = false;
+        return;
     }
+    if (completed > 1U) ++refill_timing_.coalesced_callbacks;
+    if (queue_empty) ++refill_timing_.queue_drains;
+    dma_completions_ += completed;
+    // FIR generation is intentionally deferred to main context. The circular
+    // DMA ring continues feeding SAI while retired blocks are regenerated.
+    const std::uint16_t pending = static_cast<std::uint16_t>(refill_requests_) + completed;
+    refill_requests_ = static_cast<std::uint8_t>(pending > 0xFFU ? 0xFFU : pending);
+    if (refill_requests_ > refill_timing_.maximum_pending)
+        refill_timing_.maximum_pending = refill_requests_;
 }
 } // namespace audio

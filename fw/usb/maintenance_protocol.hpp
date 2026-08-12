@@ -20,6 +20,9 @@ inline constexpr std::array<std::uint8_t, 16> get_events{{
 inline constexpr std::array<std::uint8_t, 16> get_dma_diagnostics{{
     'D','Y','K','O','-','D','M','A','-','G','E','T','-','0','0','1'
 }};
+inline constexpr std::array<std::uint8_t, 16> get_refill_timing{{
+    'D','Y','K','O','-','P','E','R','F','-','G','E','T','-','0','1'
+}};
 
 template <std::size_t N>
 inline bool is_command(const std::uint8_t* data, std::size_t size,
@@ -43,5 +46,8 @@ inline bool is_get_events(const std::uint8_t* data, std::size_t size) noexcept {
 }
 inline bool is_get_dma_diagnostics(const std::uint8_t* data, std::size_t size) noexcept {
     return is_command(data, size, get_dma_diagnostics);
+}
+inline bool is_get_refill_timing(const std::uint8_t* data, std::size_t size) noexcept {
+    return is_command(data, size, get_refill_timing);
 }
 } // namespace usb::maintenance

@@ -1,0 +1,213 @@
+#include "audio/polyphase_upsampler.hpp"
+
+#include "audio/polyphase_coefficients.hpp"
+
+#include <limits>
+
+namespace audio {
+namespace {
+constexpr std::size_t pcm_bytes_per_frame = 8U;
+constexpr std::int64_t first_tap_offset = -31;
+constexpr std::int64_t last_tap_offset = 32;
+constexpr std::size_t history_mask = PolyphaseUpsampler::history_capacity_frames - 1U;
+using PcmWord = std::uint32_t __attribute__((may_alias));
+
+#if defined(DYKODAC_HOST_TEST)
+#define DYKODAC_ITCM
+#else
+#define DYKODAC_ITCM __attribute__((section(".itcm_text"), noinline))
+#endif
+
+__attribute__((always_inline)) inline void convolve_stereo(
+    const float* __restrict left, const float* __restrict right,
+    const float* __restrict coefficients, float& left_result,
+    float& right_result) noexcept {
+    float left0 = 0.0F, left1 = 0.0F, left2 = 0.0F, left3 = 0.0F;
+    float right0 = 0.0F, right1 = 0.0F, right2 = 0.0F, right3 = 0.0F;
+    const float* const coefficients_end = coefficients + PolyphaseUpsampler::taps_per_phase;
+    do {
+        const float coefficient0 = coefficients[0];
+        const float coefficient1 = coefficients[1];
+        const float coefficient2 = coefficients[2];
+        const float coefficient3 = coefficients[3];
+        left0 += left[0] * coefficient0;
+        right0 += right[0] * coefficient0;
+        left1 += left[1] * coefficient1;
+        right1 += right[1] * coefficient1;
+        left2 += left[2] * coefficient2;
+        right2 += right[2] * coefficient2;
+        left3 += left[3] * coefficient3;
+        right3 += right[3] * coefficient3;
+        coefficients += 4;
+        left += 4;
+        right += 4;
+    } while (coefficients != coefficients_end);
+    left_result = (left0 + left1) + (left2 + left3);
+    right_result = (right0 + right1) + (right2 + right3);
+}
+
+__attribute__((always_inline)) inline void store_sample(std::uint8_t* output,
+                                                         std::int32_t sample) noexcept {
+    const std::uint32_t packed = (static_cast<std::uint32_t>(sample) & 0x00FF'FFFFU) << 8U;
+    *reinterpret_cast<PcmWord*>(output) = packed;
+}
+}
+
+void PolyphaseUpsampler::reset(std::uint32_t input_rate_hz) noexcept {
+    input_rate_hz_ = input_rate_hz;
+    source_next_index_ = 0U;
+    source_position_ = 0U;
+    phase_remainder_ = 0U;
+    position_numerator_ = 0U;
+    left_history_.fill(0.0F);
+    right_history_.fill(0.0F);
+}
+
+bool PolyphaseUpsampler::configure(std::uint32_t input_rate_hz) noexcept {
+    if (input_rate_hz == 0U || input_rate_hz > output_rate_hz) return false;
+    reset(input_rate_hz);
+    return true;
+}
+
+std::size_t PolyphaseUpsampler::input_frames_needed(std::size_t output_frames) const noexcept {
+    if (output_frames == 0U || input_rate_hz_ == 0U) return 0U;
+    std::uint64_t source_advance = 0U;
+    if (output_frames == 192U) {
+        // The DMA path fits in 32 bits and compiles to a reciprocal multiply,
+        // avoiding the Cortex runtime's 64-bit divide helper every millisecond.
+        source_advance = (phase_remainder_ + 191U * input_rate_hz_) / output_rate_hz;
+    } else {
+        const auto output_count = static_cast<std::uint64_t>(output_frames - 1U);
+        source_advance = (static_cast<std::uint64_t>(phase_remainder_) +
+                          output_count * input_rate_hz_) / output_rate_hz;
+    }
+    const std::uint64_t last_source_index = source_position_ + source_advance;
+    const std::uint64_t required_end = last_source_index + static_cast<std::uint64_t>(last_tap_offset);
+    if (required_end < source_next_index_) return 0U;
+    const std::uint64_t needed = required_end - source_next_index_ + 1U;
+    return needed > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())
+        ? std::numeric_limits<std::size_t>::max() : static_cast<std::size_t>(needed);
+}
+
+inline __attribute__((always_inline)) float PolyphaseUpsampler::decode_sample(const std::uint8_t* bytes) noexcept {
+    const auto left_justified = static_cast<std::int32_t>(
+        *reinterpret_cast<const PcmWord*>(bytes));
+    // Every signed 24-bit PCM integer is exactly representable by binary32.
+    return static_cast<float>(left_justified >> 8U);
+}
+
+inline __attribute__((always_inline)) std::int32_t PolyphaseUpsampler::saturate_sample(float value) noexcept {
+    if (value >= 8'388'607.0F) return 0x007F'FFFF;
+    if (value <= -8'388'608.0F) return -0x0080'0000;
+    return static_cast<std::int32_t>(value + (value < 0.0F ? -0.5F : 0.5F));
+}
+
+DYKODAC_ITCM std::size_t PolyphaseUpsampler::process(
+    const std::uint8_t* input, std::size_t input_frames,
+    std::uint8_t* output, std::size_t output_frames) noexcept {
+    if (input_rate_hz_ == 0U || output == nullptr) return 0U;
+
+    std::uint64_t source_next_index = source_next_index_;
+    std::uint64_t source_position = source_position_;
+    std::uint32_t phase_remainder = phase_remainder_;
+    std::size_t consumed = 0U;
+    std::size_t produced = 0U;
+
+    // A 192-frame production block advances at most 47 input frames. Together
+    // with the 64-tap window that fits in the 128-frame mirrored ring, so stage
+    // its complete input first and remove availability/modulo work from the
+    // output loop. Larger host-side calls retain the bounded streaming path.
+    std::uint64_t last_source_advance = 0U;
+    if (output_frames == 192U) {
+        last_source_advance = (phase_remainder + 191U * input_rate_hz_) / output_rate_hz;
+    } else if (output_frames != 0U) {
+        last_source_advance = (static_cast<std::uint64_t>(phase_remainder) +
+            static_cast<std::uint64_t>(output_frames - 1U) * input_rate_hz_) / output_rate_hz;
+    }
+    const bool contiguous_block = last_source_advance + taps_per_phase <= history_capacity_frames;
+
+    if (contiguous_block) {
+        const std::uint64_t required_end = source_position + last_source_advance +
+                                           static_cast<std::uint64_t>(last_tap_offset);
+        const std::uint64_t required = required_end < source_next_index ? 0U :
+                                       required_end - source_next_index + 1U;
+        const std::size_t append_count = required < input_frames ?
+            static_cast<std::size_t>(required) : input_frames;
+        while (consumed < append_count) {
+            const std::size_t slot = static_cast<std::size_t>(source_next_index) & history_mask;
+            const auto* frame = input + consumed * pcm_bytes_per_frame;
+            const float left = decode_sample(frame);
+            const float right = decode_sample(frame + 4U);
+            left_history_[slot] = left;
+            left_history_[slot + history_capacity_frames] = left;
+            right_history_[slot] = right;
+            right_history_[slot + history_capacity_frames] = right;
+            ++source_next_index;
+            ++consumed;
+        }
+    }
+
+    auto render_output = [&](std::uint8_t* frame) __attribute__((always_inline)) {
+        // Select one ready-to-use fractional-delay row.  Rounding, including
+        // the phase-1 endpoint, limits the phase error to 1/128 input sample
+        // without doing another interpolation FIR inside the audio FIR.
+        const std::uint32_t phase_position = phase_remainder * phase_count;
+        const auto phase = static_cast<std::size_t>(
+            (phase_position + output_rate_hz / 2U) / output_rate_hz);
+        const auto* coefficients = &detail::polyphase_coefficients[phase * taps_per_phase];
+        const std::size_t history_slot = (static_cast<std::size_t>(source_position) +
+                                          history_capacity_frames +
+                                          static_cast<std::size_t>(first_tap_offset)) & history_mask;
+        float left = 0.0F;
+        float right = 0.0F;
+        convolve_stereo(left_history_.data() + history_slot,
+                        right_history_.data() + history_slot,
+                        coefficients, left, right);
+        store_sample(frame, saturate_sample(left));
+        store_sample(frame + 4U, saturate_sample(right));
+        phase_remainder += input_rate_hz_;
+        if (phase_remainder >= output_rate_hz) {
+            phase_remainder -= output_rate_hz;
+            ++source_position;
+        }
+    };
+
+    const std::uint64_t block_required_end = source_position + last_source_advance +
+                                             static_cast<std::uint64_t>(last_tap_offset);
+    if (contiguous_block && source_next_index > block_required_end) {
+        // Normal DMA refills take this path: all input was staged above, so
+        // the 192-output loop contains no source-availability or append work.
+        auto* frame = output;
+        while (produced < output_frames) {
+            render_output(frame);
+            frame += pcm_bytes_per_frame;
+            ++produced;
+        }
+    } else {
+        while (produced < output_frames) {
+            const auto required_end = source_position + static_cast<std::uint64_t>(last_tap_offset);
+            while (source_next_index <= required_end && consumed < input_frames) {
+                const std::size_t slot = static_cast<std::size_t>(source_next_index) & history_mask;
+                const auto* frame = input + consumed * pcm_bytes_per_frame;
+                const float left = decode_sample(frame);
+                const float right = decode_sample(frame + 4U);
+                left_history_[slot] = left;
+                left_history_[slot + history_capacity_frames] = left;
+                right_history_[slot] = right;
+                right_history_[slot + history_capacity_frames] = right;
+                ++source_next_index;
+                ++consumed;
+            }
+            if (source_next_index <= required_end) break;
+            render_output(output + produced * pcm_bytes_per_frame);
+            ++produced;
+        }
+    }
+
+    source_next_index_ = source_next_index;
+    source_position_ = source_position;
+    phase_remainder_ = phase_remainder;
+    position_numerator_ += static_cast<std::uint64_t>(produced) * input_rate_hz_;
+    return produced;
+}
+} // namespace audio

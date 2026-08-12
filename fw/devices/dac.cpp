@@ -59,9 +59,16 @@ bool Cs4398::set_attenuation(std::int16_t db_8_8) noexcept {
 }
 
 bool Cs4398::configure_format(const audio::FormatConfig& format) noexcept {
-    if (state_ != State::ReadyMuted || format.dac_mode != 0U) return false;
+    if (state_ != State::ReadyMuted || format.dac_mode != 0U ||
+        format.output_sample_rate_hz != 192'000U || format.output_oscillator_hz != 24'576'000U)
+        return false;
     transport_.set_chip_select(true);
-    const bool ok = transport_.transfer(write_command(dac_registers::Register::Control7, 0xB0U));
+    bool ok = transport_.transfer(write_command(dac_registers::Register::Control2,
+        static_cast<std::uint8_t>(dac_registers::Control2::QuadSpeedI2s)));
+    transport_.set_chip_select(false);
+    transport_.set_chip_select(true);
+    ok = transport_.transfer(write_command(dac_registers::Register::Control7,
+        static_cast<std::uint8_t>(dac_registers::Control7::FastRollOff))) && ok;
     transport_.set_chip_select(false);
     if (!ok) safe_fault();
     return ok;
@@ -78,11 +85,23 @@ void Cs4398::poll(std::uint32_t now_ms) noexcept {
     if (!reached(now_ms, deadline_ms_)) return;
     switch (state_) {
     case State::WaitingReset:
+        // Cirrus requires CPEN before the stand-alone power-up sequence has
+        // completed (about 218 MCLK cycles).  Perform the PDN+CPEN write in the
+        // same poll that releases reset; millisecond scheduling is too slow.
         transport_.set_reset(false);
-        deadline_ms_ = now_ms + timing_.reset_release_ms;
-        state_ = State::WaitingRelease;
+        transport_.wait_after_reset_release();
+        transport_.set_chip_select(true);
+        if (!transport_.transfer(Cs4398DefaultConfiguration::bootstrap[command_index_])) {
+            transport_.set_chip_select(false);
+            transport_.set_reset(true);
+            state_ = State::Fault;
+            break;
+        }
+        transport_.set_chip_select(false);
+        ++command_index_;
+        deadline_ms_ = now_ms + timing_.inter_write_ms;
+        state_ = State::WaitingInterWrite;
         break;
-    case State::WaitingRelease:
     case State::WaitingInterWrite:
         transport_.set_chip_select(true);
         deadline_ms_ = now_ms + timing_.chip_select_setup_ms;

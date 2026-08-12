@@ -15,13 +15,13 @@ public:
     virtual ~DacTransport() = default;
     virtual void initialize() noexcept = 0;
     virtual void set_reset(bool asserted) noexcept = 0;
+    virtual void wait_after_reset_release() noexcept = 0;
     virtual void set_chip_select(bool asserted) noexcept = 0;
     virtual bool transfer(const DacCommand& command) noexcept = 0;
 };
 
 struct Cs4398Timing {
     std::uint32_t reset_assert_ms{10U};
-    std::uint32_t reset_release_ms{10U};
     std::uint32_t chip_select_setup_ms{1U};
     std::uint32_t inter_write_ms{1U};
 };
@@ -31,7 +31,7 @@ struct Cs4398DefaultConfiguration {
         {{{dac_registers::write_command, static_cast<std::uint8_t>(dac_registers::Register::Control8),
             static_cast<std::uint8_t>(dac_registers::Control8::MutedBootstrap)}}},
         {{{dac_registers::write_command, static_cast<std::uint8_t>(dac_registers::Register::Control2),
-            static_cast<std::uint8_t>(dac_registers::Control2::LegacyBootstrap)}}},
+            static_cast<std::uint8_t>(dac_registers::Control2::QuadSpeedI2s)}}},
         {{{dac_registers::write_command, static_cast<std::uint8_t>(dac_registers::Register::Control7),
             static_cast<std::uint8_t>(dac_registers::Control7::LegacyBootstrap)}}},
         {{{dac_registers::write_command, static_cast<std::uint8_t>(dac_registers::Register::Control8),
@@ -44,7 +44,7 @@ struct Cs4398DefaultConfiguration {
 class Cs4398 {
 public:
     enum class State : std::uint8_t {
-        SafeReset, WaitingReset, WaitingRelease, WaitingChipSelect,
+        SafeReset, WaitingReset, WaitingChipSelect,
         WaitingInterWrite, ReadyMuted, Fault
     };
 

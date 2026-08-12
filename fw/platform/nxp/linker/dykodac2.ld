@@ -21,6 +21,8 @@ SECTIONS
         __section_table_start = .;
         __data_section_table = .;
         LONG(LOADADDR(.data)); LONG(ADDR(.data)); LONG(SIZEOF(.data));
+        LONG(LOADADDR(.itcm_text)); LONG(ADDR(.itcm_text)); LONG(SIZEOF(.itcm_text));
+        LONG(LOADADDR(.dtcm_coefficients)); LONG(ADDR(.dtcm_coefficients)); LONG(SIZEOF(.dtcm_coefficients));
         __data_section_table_end = .;
         __bss_section_table = .;
         LONG(ADDR(.bss)); LONG(SIZEOF(.bss));
@@ -32,15 +34,31 @@ SECTIONS
     } > FLASH
     .ARM.extab : { *(.ARM.extab*) } > FLASH
     .ARM.exidx : { __exidx_start = .; *(.ARM.exidx*) __exidx_end = .; } > FLASH
+    .itcm_text : ALIGN(32)
+    {
+        __itcm_text_start__ = .;
+        *(.itcm_text*)
+        . = ALIGN(32);
+        __itcm_text_end__ = .;
+    } > SRAM_ITC AT > FLASH
     .data : ALIGN(4) { _data = .; *(.data*) . = ALIGN(4); _edata = .; } > SRAM_OC AT > FLASH
     .dma (NOLOAD) : ALIGN(32) { __dma_start__ = .; *(.dma*) . = ALIGN(32); __dma_end__ = .; } > SRAM_DTC
+    .dtcm_coefficients : ALIGN(32)
+    {
+        __dtcm_coefficients_start__ = .;
+        *(.dtcm_coefficients*)
+        . = ALIGN(32);
+        __dtcm_coefficients_end__ = .;
+    } > SRAM_DTC AT > FLASH
     .bss (NOLOAD) : ALIGN(4) { _bss = .; *(.bss*) *(COMMON) . = ALIGN(4); _ebss = .; end = .; } > SRAM_OC
     .noinit (NOLOAD) : ALIGN(4) { *(.noinit*) } > SRAM_OC
     _HeapSize = 0; _pvHeapStart = .; _pvHeapLimit = .;
     _StackSize = 0x2000;
     _vStackBase = ORIGIN(SRAM_DTC) + LENGTH(SRAM_DTC) - _StackSize;
     _vStackTop = ORIGIN(SRAM_DTC) + LENGTH(SRAM_DTC);
+    ASSERT(__dtcm_coefficients_end__ <= _vStackBase, "DTCM coefficients overlap the stack")
+    ASSERT(SIZEOF(.itcm_text) <= LENGTH(SRAM_ITC), "ITCM hot code exceeds ITCM")
     _image_start = LOADADDR(.text);
-    _image_end = LOADADDR(.data) + SIZEOF(.data);
+    _image_end = LOADADDR(.dtcm_coefficients) + SIZEOF(.dtcm_coefficients);
     _image_size = _image_end - _image_start;
 }
