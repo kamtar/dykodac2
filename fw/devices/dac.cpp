@@ -1,5 +1,7 @@
 #include "devices/dac.hpp"
 
+#include "audio/format_values.h"
+
 namespace devices {
 DacCommand write_command(dac_registers::Register reg, std::uint8_t value) noexcept {
     return {{{dac_registers::write_command, static_cast<std::uint8_t>(reg), value}}};
@@ -59,8 +61,12 @@ bool Cs4398::set_attenuation(std::int16_t db_8_8) noexcept {
 }
 
 bool Cs4398::configure_format(const audio::FormatConfig& format) noexcept {
-    if (state_ != State::ReadyMuted || format.dac_mode != 0U ||
-        format.output_sample_rate_hz != 192'000U || format.output_oscillator_hz != 24'576'000U)
+    const bool family_44k1 = format.output_sample_rate_hz == DYKODAC_OUTPUT_RATE_44K1 &&
+                             format.output_oscillator_hz == DYKODAC_OSC_44K1;
+    const bool family_48k = format.output_sample_rate_hz == DYKODAC_OUTPUT_RATE_48K &&
+                            format.output_oscillator_hz == DYKODAC_OSC_48K;
+    if (state_ != State::ReadyMuted || format.dac_mode != 0U || (!family_44k1 && !family_48k) ||
+        format.output_oscillator_hz != format.output_sample_rate_hz * 128U)
         return false;
     transport_.set_chip_select(true);
     bool ok = transport_.transfer(write_command(dac_registers::Register::Control2,

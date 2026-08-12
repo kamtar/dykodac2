@@ -14,6 +14,7 @@
 #include "platform/nxp/update_layout.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <iostream>
 #include <vector>
@@ -100,9 +101,14 @@ int main() {
           "power-on/default format is 44.1 kHz");
     check(audio::find_format(44'100U)->family == audio::ClockFamily::Family44k1, "44.1 clock family");
     check(audio::find_format(48'000U)->oscillator_hz == 24'576'000U, "48k oscillator");
-    check(audio::find_format(44'100U)->dma_frames_per_transfer == 192U &&
+    check(audio::find_format(44'100U)->output_sample_rate_hz == 176'400U &&
+          audio::find_format(44'100U)->output_oscillator_hz == 22'579'200U &&
+          audio::find_format(44'100U)->output_family == audio::ClockFamily::Family44k1 &&
+          audio::find_format(44'100U)->dma_frames_per_transfer == 176U &&
+          audio::find_format(48'000U)->output_sample_rate_hz == 192'000U &&
+          audio::find_format(48'000U)->output_oscillator_hz == 24'576'000U &&
           audio::find_format(48'000U)->dma_frames_per_transfer == 192U,
-          "DMA uses 192-frame / 1-ms output blocks");
+          "each clock family has its own near-1-ms output block");
     check(audio::find_format(96'000U) == nullptr, "unsupported rate rejection");
     for (std::size_t i = 0; i < audio::supported_format_count(); ++i) {
         const auto& f = audio::supported_format(i);
@@ -120,7 +126,8 @@ int main() {
           "real-time upsampler uses 128 taps per phase");
 
     audio::PolyphaseUpsampler upsampler;
-    check(upsampler.configure(44'100U), "44.1 kHz upsampler configuration");
+    check(upsampler.configure(44'100U, 176'400U), "44.1 to 176.4 kHz upsampler configuration");
+    check(upsampler.output_rate_hz() == 176'400U, "44.1-family output rate is configured");
     constexpr std::size_t output_frames = 6'400U;
     const std::size_t input_needed = upsampler.input_frames_needed(output_frames);
     std::vector<std::uint8_t> upsample_input(input_needed * 8U, 0U);
@@ -129,7 +136,7 @@ int main() {
           "44.1 kHz upsampler produces a complete output block");
     check(upsampler.position_numerator() == static_cast<std::uint64_t>(output_frames) * 44'100U,
           "44.1 kHz rational phase accumulator is exact");
-    check(upsampler.configure(48'000U), "48 kHz upsampler configuration");
+    check(upsampler.configure(48'000U, 192'000U), "48 to 192 kHz upsampler configuration");
     check(upsampler.input_frames_needed(192U) == 112U,
           "48 kHz phase scheduler includes the fixed FIR lookahead");
     constexpr std::size_t dc_output_frames = 1'536U;
@@ -150,13 +157,51 @@ int main() {
           upsample_output[1'280U * 8U + 7U] >= 0x7EU,
           "polyphase DC response remains near unity after FIR warm-up");
 
+    // Exact integer-family ratios must walk the phase bank without any
+    // nearest-phase drift: 4x is 0, 1/4, 1/2, 3/4 and 2x is 0, 1/2.
+    audio::PolyphaseUpsampler phase_4x;
+    check(phase_4x.configure(44'100U, 176'400U), "4x phase test configuration");
+    std::vector<std::uint8_t> phase_input(65U * 8U, 0U);
+    std::array<std::uint32_t, 4U> phase_4x_expected{{44'100U, 88'200U, 132'300U, 0U}};
+    std::array<std::uint8_t, 8U> phase_output{};
+    for (const auto expected : phase_4x_expected) {
+        const std::size_t needed = phase_4x.input_frames_needed(1U);
+        check(phase_4x.process(needed == 0U ? nullptr : phase_input.data(), needed,
+                               phase_output.data(), 1U) == 1U,
+              "4x phase test renders one frame");
+        check(phase_4x.phase_remainder() == expected, "4x phase progression is exact");
+    }
+    audio::PolyphaseUpsampler phase_2x;
+    check(phase_2x.configure(88'200U, 176'400U), "2x phase test configuration");
+    for (const auto expected : std::array<std::uint32_t, 2U>{{88'200U, 0U}}) {
+        const std::size_t needed = phase_2x.input_frames_needed(1U);
+        check(phase_2x.process(needed == 0U ? nullptr : phase_input.data(), needed,
+                               phase_output.data(), 1U) == 1U,
+              "2x phase test renders one frame");
+        check(phase_2x.phase_remainder() == expected, "2x phase progression is exact");
+    }
+    audio::PolyphaseUpsampler native;
+    check(native.configure(176'400U, 176'400U), "native 176.4 kHz configuration");
+    std::array<std::uint8_t, 32U> native_input{};
+    for (std::size_t i = 0U; i < native_input.size(); ++i)
+        native_input[i] = static_cast<std::uint8_t>(i * 13U);
+    std::array<std::uint8_t, 32U> native_output{};
+    check(native.input_frames_needed(4U) == 4U &&
+          native.process(native_input.data(), 4U, native_output.data(), 4U) == 4U &&
+          native_output == native_input,
+          "native-rate path bypasses the FIR without changing PCM");
+    audio::PolyphaseUpsampler rate_96;
+    check(rate_96.configure(96'000U, 192'000U), "96 to 192 kHz configuration");
+    check(rate_96.input_frames_needed(192U) == 160U,
+          "96 to 192 scheduler includes the FIR lookahead");
+
     // One-millisecond calls and large calls must remain exactly equivalent
     // across mirrored-history wrap boundaries and complementary/reversed
     // phase-kernel selection.
     constexpr std::size_t comparison_frames = 192U * 10U;
     audio::PolyphaseUpsampler full_call;
     audio::PolyphaseUpsampler blocked_call;
-    check(full_call.configure(44'100U) && blocked_call.configure(44'100U),
+    check(full_call.configure(44'100U, 176'400U) && blocked_call.configure(44'100U, 176'400U),
           "comparison upsamplers configure");
     const std::size_t comparison_input_frames = full_call.input_frames_needed(comparison_frames);
     std::vector<std::uint8_t> comparison_input(comparison_input_frames * 8U, 0U);

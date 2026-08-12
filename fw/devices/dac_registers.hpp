@@ -14,7 +14,8 @@ enum class Register : std::uint8_t {
 inline constexpr std::uint8_t write_command = 0x98U;
 
 enum class Control2 : std::uint8_t {
-    // I2S (DIF=001) + quad-speed PCM (FM=10), for 192 kHz at 24.576 MHz MCLK.
+    // I2S (DIF=001) + quad-speed PCM (FM=10), for both 176.4 kHz/22.5792 MHz
+    // and 192 kHz/24.576 MHz external-clock families.
     QuadSpeedI2s = 0x12U,
 };
 enum class Control7 : std::uint8_t {

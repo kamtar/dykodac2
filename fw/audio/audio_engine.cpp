@@ -23,8 +23,8 @@ constexpr std::uint32_t dma_irq_priority = 1U;
 // fixed DTCM coefficient bank and 8 KiB stack remain untouched; each completed
 // buffer is explicitly cleaned before eDMA reads it.
 alignas(32) std::uint8_t dma_audio[audio::AudioEngine::dma_buffer_count][1536]{};
-// The first 48-kHz block needs 47 source advances plus the FIR's 64-frame
-// lookahead. Later one-millisecond refills need only 48 source frames.
+// The largest currently advertised block is 192 output frames at 48 kHz:
+// 47 source advances plus the FIR's 64-frame lookahead.
 constexpr std::size_t maximum_upsampler_input_frames =
     audio::PolyphaseUpsampler::taps_per_phase / 2U + 48U;
 __attribute__((section(".dma"), aligned(32)))
@@ -147,7 +147,7 @@ bool AudioEngine::start(const FormatConfig& config, StreamBuffer& stream) noexce
     transfer_bytes_ = static_cast<std::size_t>(config.dma_frames_per_transfer) * bytes_per_frame(config.format);
     if (transfer_bytes_ > sizeof(dma_audio[0])) return false;
     transfer_frames_ = config.dma_frames_per_transfer;
-    if (!upsampler_.configure(config.format.sample_rate_hz)) return false;
+    if (!upsampler_.configure(config.format.sample_rate_hz, config.output_sample_rate_hz)) return false;
     board::target::initialize_audio_pins();
     IOMUXC_SetSaiMClkClockSource(IOMUXC_GPR, kIOMUXC_GPR_SAI1MClk1Sel, 3U);
 

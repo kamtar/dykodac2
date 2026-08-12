@@ -8,8 +8,9 @@ The currently implemented boundary contains:
 
 - a named compile-time board map preserving prototype mappings;
 - one source of truth for the two initial audio formats;
-- one fixed 192-kHz DAC output fed by a 64-phase, 128-tap binary32 polyphase
-  upsampler; input-rate changes select the exact rational phase trajectory;
+- dual-family DAC output: 44.1 kHz input selects 176.4 kHz/22.5792 MHz and
+  48 kHz input selects 192 kHz/24.576 MHz, both using the 64-phase, 128-tap
+  binary32 polyphase upsampler;
 - integer UAC2 attenuation conversion and typed DAC commands;
 - safety outputs for boot, preparation, playback, switching, stop, and fault;
 - native tests that verify the core invariants without NXP registers.

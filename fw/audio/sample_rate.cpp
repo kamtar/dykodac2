@@ -5,8 +5,12 @@
 
 namespace audio {
 namespace {
-constexpr std::uint32_t output_sample_rate_hz = 192'000U;
-constexpr std::uint32_t output_oscillator_hz = 24'576'000U;
+constexpr std::uint16_t output_dma_frames(std::uint32_t rate_hz) {
+    // Keep each eDMA transfer close to one millisecond in its own output
+    // clock domain. The fractional remainder is naturally carried by the
+    // oscillator itself, not by this block-size choice.
+    return static_cast<std::uint16_t>(rate_hz / 1'000U);
+}
 
 constexpr std::uint16_t max_hs_packet(std::uint32_t rate) {
     // HS UAC2 interval is 125 us. An asynchronous sink must accept the
@@ -16,12 +20,16 @@ constexpr std::uint16_t max_hs_packet(std::uint32_t rate) {
 
 constexpr std::array<FormatConfig, 2> formats{{
     {{DYKODAC_RATE_44K1, DYKODAC_CHANNELS, DYKODAC_SUBSLOT_BYTES * 8U, DYKODAC_VALID_BITS}, ClockFamily::Family44k1, DYKODAC_OSC_44K1, 512U,
-     max_hs_packet(DYKODAC_RATE_44K1), 1U, 192U, (DYKODAC_RATE_44K1 << 16U) / 8'000U, 0U,
-     output_sample_rate_hz, output_oscillator_hz, ClockFamily::Family48k},
+     max_hs_packet(DYKODAC_RATE_44K1), 1U, output_dma_frames(DYKODAC_OUTPUT_RATE_44K1),
+     (DYKODAC_RATE_44K1 << 16U) / 8'000U, 0U,
+     DYKODAC_OUTPUT_RATE_44K1, DYKODAC_OSC_44K1, ClockFamily::Family44k1},
     {{DYKODAC_RATE_48K, DYKODAC_CHANNELS, DYKODAC_SUBSLOT_BYTES * 8U, DYKODAC_VALID_BITS}, ClockFamily::Family48k, DYKODAC_OSC_48K, 512U,
-     max_hs_packet(DYKODAC_RATE_48K), 1U, 192U, (DYKODAC_RATE_48K << 16U) / 8'000U, 0U,
-     output_sample_rate_hz, output_oscillator_hz, ClockFamily::Family48k},
+     max_hs_packet(DYKODAC_RATE_48K), 1U, output_dma_frames(DYKODAC_OUTPUT_RATE_48K),
+     (DYKODAC_RATE_48K << 16U) / 8'000U, 0U,
+     DYKODAC_OUTPUT_RATE_48K, DYKODAC_OSC_48K, ClockFamily::Family48k},
 }};
+static_assert(DYKODAC_OUTPUT_RATE_44K1 * 128U == DYKODAC_OSC_44K1);
+static_assert(DYKODAC_OUTPUT_RATE_48K * 128U == DYKODAC_OSC_48K);
 static_assert(max_hs_packet(DYKODAC_RATE_44K1) == DYKODAC_USB_HS_MAX_PACKET);
 static_assert(max_hs_packet(DYKODAC_RATE_48K) == DYKODAC_USB_HS_MAX_PACKET);
 } // namespace

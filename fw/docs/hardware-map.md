@@ -39,9 +39,11 @@ sequence. The second write selects quad-speed I2S. The final write disables
 automatic silence muting and explicitly mutes both channels until stream
 startup is stable.
 
-The software output stage now converts the USB 44.1/48-kHz input to fixed
-192-kHz PCM. The CS4398 is placed in quad-speed I2S mode (`98 02 12`) using
-the existing 24.576-MHz MCLK (128 x 192 kHz), and register 07 remains the
+The software output stage follows the USB clock family: 44.1-kHz input becomes
+176.4-kHz PCM from the 22.5792-MHz oscillator, while 48-kHz input becomes
+192-kHz PCM from the 24.576-MHz oscillator. GPIO1_IO05 selects the external
+oscillator and SAI1 receives it on the MCLK1 input path. The CS4398 remains in
+quad-speed I2S mode (`98 02 12`) for both families; register 07 remains the
 fast-roll-off internal interpolation selection (`98 07 B0`). The CS4398 does
 not provide an external digital-filter bypass; “external filter” therefore
 means the board's analog output filter, not a bypass of the DAC's digital

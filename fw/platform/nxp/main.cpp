@@ -136,8 +136,9 @@ void run_start(Runtime& r, std::uint32_t now) {
     switch (r.step) {
     case StartStep::RelayRelease:
         if (!reached(now, r.deadline)) break;
-        // The USB input family may be 44.1/48 kHz, but the DAC clock is fixed
-        // at the 48-kHz oscillator family for the 192-kHz output stage.
+        // The DAC output family follows the requested USB family. GPIO1_IO05
+        // selects the external 22.5792-MHz or 24.576-MHz oscillator; the SAI
+        // input MCLK path remains unchanged while the stopped stream settles.
         r.clocks.select(r.desired->output_family);
         r.deadline = now + config::board::oscillator_settle_us / 1'000U;
         r.step = StartStep::ClockSettle;
@@ -208,8 +209,7 @@ void update_leds(Runtime& r, std::uint32_t now) {
     }
 
     // Front-panel meaning follows the format requested by the PC: green is
-    // the 44.1-kHz family and red is the 48-kHz family. The DAC oscillator is
-    // fixed to the 48-kHz family by the 192-kHz output stage.
+    // the 44.1-kHz family and red is the 48-kHz family.
     const bool family_48k = r.desired && r.desired->family == audio::ClockFamily::Family48k;
     bool on = true;
     if (!r.mounted) {

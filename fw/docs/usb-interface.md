@@ -88,12 +88,16 @@ py tools/watch_dma_diagnostics.py
 
 ## Expected hardware signals
 
-For either USB input rate, expect the fixed DAC-output clocks: 24.576 MHz MCLK,
-12.288 MHz BCLK, and 192 kHz LRCLK. SAI is stereo I2S with 24 valid bits in
-32-bit slots. At boot the CS4398 reset is held for 10 ms; after release, the
-6 MHz SPI sequence is `98 08 C0`, `98 02 12`, `98 07 B0`, `98 08 40`,
-`98 04 18`. Stream preparation repeats the quad-speed format write and applies
-mute/attenuation; unmute is `98 04 00`. Reset is asserted again on DAC bus
+For 44.1-kHz USB input, expect 22.5792 MHz MCLK, 11.2896 MHz BCLK, and
+176.4 kHz LRCLK. For 48-kHz USB input, expect 24.576 MHz MCLK, 12.288 MHz
+BCLK, and 192 kHz LRCLK. SAI is stereo I2S with 24 valid bits in 32-bit slots.
+GPIO1_IO05 is the single oscillator-select control. At boot the CS4398 reset is
+held for 10 ms; after release, the 6 MHz SPI sequence is `98 08 C0`,
+`98 02 12`, `98 07 B0`, `98 08 40`, `98 04 18`. Stream preparation repeats
+the quad-speed format write and applies mute/attenuation; unmute is `98 04 00`.
+On a rate-family change, the relay and DAC are muted, SAI/eDMA is stopped, the
+oscillator GPIO is changed, the external clock is allowed to settle for 50 ms,
+and SAI/eDMA is rebuilt before unmute. Reset is asserted again on DAC bus
 failure.
 
 ## First-flash validation

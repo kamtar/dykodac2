@@ -2,6 +2,7 @@
 
 #include "audio/polyphase_coefficients.hpp"
 
+#include <cstring>
 #include <limits>
 
 namespace audio {
@@ -88,8 +89,10 @@ __attribute__((always_inline)) inline void store_sample(std::uint8_t* output,
 }
 }
 
-void PolyphaseUpsampler::reset(std::uint32_t input_rate_hz) noexcept {
+void PolyphaseUpsampler::reset(std::uint32_t input_rate_hz,
+                               std::uint32_t output_rate_hz) noexcept {
     input_rate_hz_ = input_rate_hz;
+    output_rate_hz_ = output_rate_hz;
     source_next_index_ = 0U;
     source_position_ = 0U;
     phase_remainder_ = 0U;
@@ -103,24 +106,21 @@ void PolyphaseUpsampler::reset(std::uint32_t input_rate_hz) noexcept {
 #endif
 }
 
-bool PolyphaseUpsampler::configure(std::uint32_t input_rate_hz) noexcept {
-    if (input_rate_hz == 0U || input_rate_hz > output_rate_hz) return false;
-    reset(input_rate_hz);
+bool PolyphaseUpsampler::configure(std::uint32_t input_rate_hz,
+                                   std::uint32_t output_rate_hz) noexcept {
+    if (input_rate_hz == 0U || output_rate_hz == 0U || input_rate_hz > output_rate_hz)
+        return false;
+    reset(input_rate_hz, output_rate_hz);
     return true;
 }
 
 std::size_t PolyphaseUpsampler::input_frames_needed(std::size_t output_frames) const noexcept {
     if (output_frames == 0U || input_rate_hz_ == 0U) return 0U;
+    if (input_rate_hz_ == output_rate_hz_) return output_frames;
     std::uint64_t source_advance = 0U;
-    if (output_frames == 192U) {
-        // The DMA path fits in 32 bits and compiles to a reciprocal multiply,
-        // avoiding the Cortex runtime's 64-bit divide helper every millisecond.
-        source_advance = (phase_remainder_ + 191U * input_rate_hz_) / output_rate_hz;
-    } else {
-        const auto output_count = static_cast<std::uint64_t>(output_frames - 1U);
-        source_advance = (static_cast<std::uint64_t>(phase_remainder_) +
-                          output_count * input_rate_hz_) / output_rate_hz;
-    }
+    const auto output_count = static_cast<std::uint64_t>(output_frames - 1U);
+    source_advance = (static_cast<std::uint64_t>(phase_remainder_) +
+                      output_count * input_rate_hz_) / output_rate_hz_;
     const std::uint64_t last_source_index = source_position_ + source_advance;
     const std::uint64_t required_end = last_source_index + static_cast<std::uint64_t>(last_tap_offset);
     if (required_end < source_next_index_) return 0U;
@@ -145,7 +145,17 @@ inline __attribute__((always_inline)) std::int32_t PolyphaseUpsampler::saturate_
 DYKODAC_HOT std::size_t PolyphaseUpsampler::process(
     const std::uint8_t* input, std::size_t input_frames,
     std::uint8_t* output, std::size_t output_frames) noexcept {
-    if (input_rate_hz_ == 0U || output == nullptr) return 0U;
+    if (input_rate_hz_ == 0U || output == nullptr || output_frames == 0U) return 0U;
+
+    if (input_rate_hz_ == output_rate_hz_) {
+        const std::size_t produced = input_frames < output_frames ? input_frames : output_frames;
+        if (produced == 0U || input == nullptr) return 0U;
+        std::memmove(output, input, produced * pcm_bytes_per_frame);
+        source_next_index_ += produced;
+        source_position_ += produced;
+        position_numerator_ += static_cast<std::uint64_t>(produced) * input_rate_hz_;
+        return produced;
+    }
 
     std::uint64_t source_next_index = source_next_index_;
     std::uint64_t source_position = source_position_;
@@ -165,11 +175,9 @@ DYKODAC_HOT std::size_t PolyphaseUpsampler::process(
     // the bounded path; its per-output availability check is tiny beside the
     // 128-tap convolution and avoids doubling the history allocation.
     std::uint64_t last_source_advance = 0U;
-    if (output_frames == 192U) {
-        last_source_advance = (phase_remainder + 191U * input_rate_hz_) / output_rate_hz;
-    } else if (output_frames != 0U) {
+    if (output_frames != 0U) {
         last_source_advance = (static_cast<std::uint64_t>(phase_remainder) +
-            static_cast<std::uint64_t>(output_frames - 1U) * input_rate_hz_) / output_rate_hz;
+            static_cast<std::uint64_t>(output_frames - 1U) * input_rate_hz_) / output_rate_hz_;
     }
     const bool contiguous_block = last_source_advance + taps_per_phase <= history_capacity_frames;
 
@@ -198,9 +206,9 @@ DYKODAC_HOT std::size_t PolyphaseUpsampler::process(
         // Select one ready-to-use fractional-delay row.  Rounding, including
         // the phase-1 endpoint, limits the phase error to 1/128 input sample
         // without doing another interpolation FIR inside the audio FIR.
-        const std::uint32_t phase_position = phase_remainder * phase_count;
+        const std::uint64_t phase_position = static_cast<std::uint64_t>(phase_remainder) * phase_count;
         const auto phase = static_cast<std::size_t>(
-            (phase_position + output_rate_hz / 2U) / output_rate_hz);
+            (phase_position + output_rate_hz_ / 2U) / output_rate_hz_);
         const bool reverse_coefficients = phase > phase_count / 2U;
         const std::size_t stored_phase = reverse_coefficients ? phase_count - phase : phase;
         const auto* coefficients = &detail::polyphase_coefficients[stored_phase * taps_per_phase];
@@ -221,8 +229,8 @@ DYKODAC_HOT std::size_t PolyphaseUpsampler::process(
         store_sample(frame, saturate_sample(left));
         store_sample(frame + 4U, saturate_sample(right));
         phase_remainder += input_rate_hz_;
-        if (phase_remainder >= output_rate_hz) {
-            phase_remainder -= output_rate_hz;
+        if (phase_remainder >= output_rate_hz_) {
+            phase_remainder -= output_rate_hz_;
             ++source_position;
         }
     };
@@ -231,7 +239,7 @@ DYKODAC_HOT std::size_t PolyphaseUpsampler::process(
                                              static_cast<std::uint64_t>(last_tap_offset);
     if (contiguous_block && source_next_index > block_required_end) {
         // Normal DMA refills take this path: all input was staged above, so
-        // the 192-output loop contains no source-availability or append work.
+        // the output loop contains no source-availability or append work.
         auto* frame = output;
         while (produced < output_frames) {
             render_output(frame);
