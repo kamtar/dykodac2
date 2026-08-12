@@ -51,7 +51,8 @@ public:
     void capture_dma_diagnostics(std::uint32_t now_ms) noexcept;
     const DmaDiagnosticSnapshot& dma_diagnostics() const noexcept { return dma_diagnostics_; }
     const RefillTimingSnapshot& refill_timing() const noexcept { return refill_timing_; }
-    void on_dma_complete(bool success, bool queue_empty, std::uint8_t completed) noexcept;
+    void on_dma_complete(bool success, bool queue_empty, std::uint8_t completed,
+                         std::uint8_t observed) noexcept;
 private:
     std::uint8_t* prepare_next_buffer() noexcept;
     std::uint8_t* timed_prepare_next_buffer() noexcept;

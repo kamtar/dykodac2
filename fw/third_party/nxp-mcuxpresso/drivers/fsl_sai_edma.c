@@ -100,13 +100,14 @@ static void SAI_TxEDMACallback(edma_handle_t *handle, void *userData, bool done,
 
     /* Preserve the eDMA completion count for the application callback. The
      * original wrapper discarded it, which makes loop-buffer ownership
-     * ambiguous if several major loops are reported by one IRQ. */
+     * ambiguous if several descriptors are reported by one IRQ. */
     if ((saiHandle->state == (uint32_t)kSAI_BusyLoopTransfer) && (tcds == 0U))
     {
-        /* The generic eDMA queue accounting is modulo tcdSize. In a permanent
-         * loop, returning to the same descriptor means one whole loop retired,
-         * not zero transfers. */
-        tcds = SAI_XFER_QUEUE_SIZE;
+        /* The generic queue accounting aliases at the loop boundary and also
+         * starts with a header state intended for transactional submissions.
+         * Only the most recently retired slot is safe to rewrite: treating an
+         * ambiguous zero as a whole ring races DMA against active buffers. */
+        tcds = 1U;
     }
     if (saiHandle->state == (uint32_t)kSAI_BusyLoopTransfer)
     {
@@ -157,7 +158,9 @@ static void SAI_RxEDMACallback(edma_handle_t *handle, void *userData, bool done,
 
     if ((saiHandle->state == (uint32_t)kSAI_BusyLoopTransfer) && (tcds == 0U))
     {
-        tcds = SAI_XFER_QUEUE_SIZE;
+        /* See the transmit path: never rewrite an entire active ring when the
+         * generic queue position aliases to zero. */
+        tcds = 1U;
     }
     if (saiHandle->state == (uint32_t)kSAI_BusyLoopTransfer)
     {
@@ -747,6 +750,11 @@ status_t SAI_TransferSendLoopEDMA(I2S_Type *base,
         tcdIndex = tcdIndex + 1U;
     }
 
+    /* This permanent pool is populated directly instead of through
+     * EDMA_SubmitTransfer. Start generic IRQ position tracking at descriptor
+     * zero so the first completion advances by one rather than aliasing. */
+    handle->dmaHandle->header  = 0;
+    handle->dmaHandle->tcdUsed = 0;
     EDMA_InstallTCD(handle->dmaHandle->base, handle->dmaHandle->channel, &currentTCD[0]);
     /* Start DMA transfer */
     EDMA_StartTransfer(handle->dmaHandle);
@@ -830,6 +838,9 @@ status_t SAI_TransferReceiveLoopEDMA(I2S_Type *base,
         tcdIndex = tcdIndex + 1U;
     }
 
+    /* Match the transmit loop's directly populated TCD position tracking. */
+    handle->dmaHandle->header  = 0;
+    handle->dmaHandle->tcdUsed = 0;
     EDMA_InstallTCD(handle->dmaHandle->base, handle->dmaHandle->channel, &currentTCD[0]);
     /* Start DMA transfer */
     EDMA_StartTransfer(handle->dmaHandle);

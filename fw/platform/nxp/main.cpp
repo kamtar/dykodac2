@@ -311,7 +311,8 @@ int main() {
         }
         if (runtime.usb_ready) runtime.usb.task();
         for (usb::EventRecord usb_event = runtime.usb.take_event(); usb_event.event != usb::Event::None;
-             usb_event = runtime.usb.take_event()) switch (usb_event.event) {
+             usb_event = runtime.usb.take_event()) {
+            switch (usb_event.event) {
         case usb::Event::Mounted: runtime.mounted = true; runtime.suspended = false; break;
         case usb::Event::Start:
             runtime.stream_requested = true;
@@ -433,6 +434,11 @@ int main() {
             runtime.updater_deadline = now + 2'000U;
             break;
         default: break;
+            }
+            // Refill between control/maintenance events. Windows can enqueue
+            // many volume updates while dragging its slider; processing the
+            // whole burst before servicing audio advances DMA ownership.
+            runtime.engine.service();
         }
         if (runtime.resume_pending && runtime.stream_requested &&
             runtime.stream.size() >= audio::StreamBuffer::capacity_bytes / 2U) {

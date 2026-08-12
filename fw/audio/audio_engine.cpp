@@ -16,7 +16,8 @@ constexpr std::uint32_t dma_channel = 0U;
 static_assert(audio::AudioEngine::dma_buffer_count == SAI_XFER_QUEUE_SIZE,
               "audio buffer count must fit the SAI loop TCD pool");
 // DMA completion must be able to preempt USB. The four-entry circular TCD ring
-// keeps running independently while main context regenerates retired buffers.
+// keeps running independently while main context regenerates only retired
+// buffers; active buffers must never be rewritten to "catch up".
 constexpr std::uint32_t dma_irq_priority = 1U;
 // Four buffers keep 4 ms of output queued. They live in cacheable OCRAM so the
 // fixed DTCM coefficient bank and 8 KiB stack remain untouched; each completed
@@ -64,10 +65,10 @@ void fade(std::uint8_t* data, std::size_t first_frame, std::size_t frames, bool 
 
 void dma_callback(I2S_Type*, sai_edma_handle_t* handle, status_t status, void* user_data) {
     const bool completed = status == kStatus_SAI_TxBusy || status == kStatus_SAI_TxIdle;
-    // The eDMA driver can retire multiple TCDs before servicing one IRQ. The
-    // local SAI wrapper preserves that count for circular-buffer ownership.
+    // A permanent ring releases one software slot per IRQ. Keep the SDK's raw
+    // queue estimate only for diagnostics; it must not cause burst refills.
     static_cast<audio::AudioEngine*>(user_data)->on_dma_complete(
-        completed, status == kStatus_SAI_TxIdle, handle->completedTransferCount);
+        completed, status == kStatus_SAI_TxIdle, 1U, handle->completedTransferCount);
 }
 }
 
@@ -257,7 +258,8 @@ void AudioEngine::capture_dma_diagnostics(std::uint32_t now_ms) noexcept {
     dma_diagnostics_.tcd_csr = tcd.CSR;
 }
 
-void AudioEngine::on_dma_complete(bool success, bool queue_empty, std::uint8_t completed) noexcept {
+void AudioEngine::on_dma_complete(bool success, bool queue_empty, std::uint8_t completed,
+                                  std::uint8_t observed) noexcept {
     // Abort can race with an already-pending completion interrupt. Once stop
     // publishes running_=false, that stale callback must not refill/requeue.
     if (!running_) return;
@@ -271,7 +273,7 @@ void AudioEngine::on_dma_complete(bool success, bool queue_empty, std::uint8_t c
         ++dma_errors_;
         return;
     }
-    if (completed > 1U) ++refill_timing_.coalesced_callbacks;
+    if (observed > 1U) ++refill_timing_.coalesced_callbacks;
     if (queue_empty) ++refill_timing_.queue_drains;
     dma_completions_ += completed;
     // FIR generation is intentionally deferred to main context. The circular

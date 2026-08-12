@@ -41,6 +41,15 @@ checks. The filter needs 64 future input frames, adding about 1.45 ms at
 report exposes average, maximum, and last refill cycles plus the peak pending-
 refill depth.
 
+Four one-millisecond output buffers form a permanent eDMA scatter/gather ring.
+Each completion only retires buffer ownership in the interrupt; main context
+regenerates those retired buffers while eDMA continues from the remaining
+entries. The SDK's modulo TCD count is retained only as diagnostic evidence.
+Each DMA interrupt releases exactly one software entry; delayed queue positions
+are absorbed by subsequent interrupts instead of causing burst refills that
+advance the resampler and USB ring ahead of the output timeline. Audio service
+also runs between queued USB control and maintenance events.
+
 A 512-tap hardware experiment was rejected because its direct stereo FIR was
 projected from the measured 64-tap baseline to require about 816,000 average
 and 914,000 worst-case cycles per one-millisecond refill, exceeding the
