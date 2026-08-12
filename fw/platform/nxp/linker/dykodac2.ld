@@ -43,6 +43,13 @@ SECTIONS
     } > SRAM_ITC AT > FLASH
     .data : ALIGN(4) { _data = .; *(.data*) . = ALIGN(4); _edata = .; } > SRAM_OC AT > FLASH
     .dma (NOLOAD) : ALIGN(32) { __dma_start__ = .; *(.dma*) . = ALIGN(32); __dma_end__ = .; } > SRAM_DTC
+    .dtcm_history (NOLOAD) : ALIGN(32)
+    {
+        __dtcm_history_start__ = .;
+        *(.dtcm_history*)
+        . = ALIGN(32);
+        __dtcm_history_end__ = .;
+    } > SRAM_DTC
     .dtcm_coefficients : ALIGN(32)
     {
         __dtcm_coefficients_start__ = .;
@@ -57,6 +64,7 @@ SECTIONS
     _vStackBase = ORIGIN(SRAM_DTC) + LENGTH(SRAM_DTC) - _StackSize;
     _vStackTop = ORIGIN(SRAM_DTC) + LENGTH(SRAM_DTC);
     ASSERT(__dtcm_coefficients_end__ <= _vStackBase, "DTCM coefficients overlap the stack")
+    ASSERT(SIZEOF(.bss) + SIZEOF(.data) + SIZEOF(.noinit) <= LENGTH(SRAM_OC), "OCRAM overflow")
     ASSERT(SIZEOF(.itcm_text) <= LENGTH(SRAM_ITC), "ITCM hot code exceeds ITCM")
     _image_start = LOADADDR(.text);
     _image_end = LOADADDR(.dtcm_coefficients) + SIZEOF(.dtcm_coefficients);

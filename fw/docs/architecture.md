@@ -8,7 +8,7 @@ The currently implemented boundary contains:
 
 - a named compile-time board map preserving prototype mappings;
 - one source of truth for the two initial audio formats;
-- one fixed 192-kHz DAC output fed by a 64-phase, 64-tap Q1.31 polyphase
+- one fixed 192-kHz DAC output fed by a 64-phase, 128-tap binary32 polyphase
   upsampler; input-rate changes select the exact rational phase trajectory;
 - integer UAC2 attenuation conversion and typed DAC commands;
 - safety outputs for boot, preparation, playback, switching, stop, and fault;

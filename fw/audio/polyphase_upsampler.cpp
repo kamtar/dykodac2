@@ -7,15 +7,21 @@
 namespace audio {
 namespace {
 constexpr std::size_t pcm_bytes_per_frame = 8U;
-constexpr std::int64_t first_tap_offset = -31;
-constexpr std::int64_t last_tap_offset = 32;
+constexpr std::int64_t first_tap_offset =
+    1 - static_cast<std::int64_t>(PolyphaseUpsampler::taps_per_phase / 2U);
+constexpr std::int64_t last_tap_offset =
+    static_cast<std::int64_t>(PolyphaseUpsampler::taps_per_phase / 2U);
 constexpr std::size_t history_mask = PolyphaseUpsampler::history_capacity_frames - 1U;
 using PcmWord = std::uint32_t __attribute__((may_alias));
 
 #if defined(DYKODAC_HOST_TEST)
-#define DYKODAC_ITCM
+#define DYKODAC_HOT
 #else
-#define DYKODAC_ITCM __attribute__((section(".itcm_text"), noinline))
+#define DYKODAC_HOT __attribute__((section(".itcm_text"), noinline))
+__attribute__((section(".dtcm_history"), aligned(32)))
+std::array<float, PolyphaseUpsampler::history_capacity_frames * 2U> target_left_history{};
+__attribute__((section(".dtcm_history"), aligned(32)))
+std::array<float, PolyphaseUpsampler::history_capacity_frames * 2U> target_right_history{};
 #endif
 
 __attribute__((always_inline)) inline void convolve_stereo(
@@ -46,6 +52,35 @@ __attribute__((always_inline)) inline void convolve_stereo(
     right_result = (right0 + right1) + (right2 + right3);
 }
 
+__attribute__((always_inline)) inline void convolve_stereo_reversed(
+    const float* __restrict left, const float* __restrict right,
+    const float* __restrict coefficients, float& left_result,
+    float& right_result) noexcept {
+    float left0 = 0.0F, left1 = 0.0F, left2 = 0.0F, left3 = 0.0F;
+    float right0 = 0.0F, right1 = 0.0F, right2 = 0.0F, right3 = 0.0F;
+    std::size_t remaining = PolyphaseUpsampler::taps_per_phase;
+    do {
+        const float coefficient0 = coefficients[0];
+        const float coefficient1 = coefficients[-1];
+        const float coefficient2 = coefficients[-2];
+        const float coefficient3 = coefficients[-3];
+        left0 += left[0] * coefficient0;
+        right0 += right[0] * coefficient0;
+        left1 += left[1] * coefficient1;
+        right1 += right[1] * coefficient1;
+        left2 += left[2] * coefficient2;
+        right2 += right[2] * coefficient2;
+        left3 += left[3] * coefficient3;
+        right3 += right[3] * coefficient3;
+        coefficients -= 4;
+        left += 4;
+        right += 4;
+        remaining -= 4U;
+    } while (remaining != 0U);
+    left_result = (left0 + left1) + (left2 + left3);
+    right_result = (right0 + right1) + (right2 + right3);
+}
+
 __attribute__((always_inline)) inline void store_sample(std::uint8_t* output,
                                                          std::int32_t sample) noexcept {
     const std::uint32_t packed = (static_cast<std::uint32_t>(sample) & 0x00FF'FFFFU) << 8U;
@@ -59,8 +94,13 @@ void PolyphaseUpsampler::reset(std::uint32_t input_rate_hz) noexcept {
     source_position_ = 0U;
     phase_remainder_ = 0U;
     position_numerator_ = 0U;
+#if defined(DYKODAC_HOST_TEST)
     left_history_.fill(0.0F);
     right_history_.fill(0.0F);
+#else
+    target_left_history.fill(0.0F);
+    target_right_history.fill(0.0F);
+#endif
 }
 
 bool PolyphaseUpsampler::configure(std::uint32_t input_rate_hz) noexcept {
@@ -102,7 +142,7 @@ inline __attribute__((always_inline)) std::int32_t PolyphaseUpsampler::saturate_
     return static_cast<std::int32_t>(value + (value < 0.0F ? -0.5F : 0.5F));
 }
 
-DYKODAC_ITCM std::size_t PolyphaseUpsampler::process(
+DYKODAC_HOT std::size_t PolyphaseUpsampler::process(
     const std::uint8_t* input, std::size_t input_frames,
     std::uint8_t* output, std::size_t output_frames) noexcept {
     if (input_rate_hz_ == 0U || output == nullptr) return 0U;
@@ -112,11 +152,18 @@ DYKODAC_ITCM std::size_t PolyphaseUpsampler::process(
     std::uint32_t phase_remainder = phase_remainder_;
     std::size_t consumed = 0U;
     std::size_t produced = 0U;
+#if defined(DYKODAC_HOST_TEST)
+    auto* const left_history = left_history_.data();
+    auto* const right_history = right_history_.data();
+#else
+    auto* const left_history = target_left_history.data();
+    auto* const right_history = target_right_history.data();
+#endif
 
-    // A 192-frame production block advances at most 47 input frames. Together
-    // with the 64-tap window that fits in the 128-frame mirrored ring, so stage
-    // its complete input first and remove availability/modulo work from the
-    // output loop. Larger host-side calls retain the bounded streaming path.
+    // Stage a complete block only when doing so cannot overwrite history still
+    // needed by its first output. The 128-frame target ring intentionally uses
+    // the bounded path; its per-output availability check is tiny beside the
+    // 128-tap convolution and avoids doubling the history allocation.
     std::uint64_t last_source_advance = 0U;
     if (output_frames == 192U) {
         last_source_advance = (phase_remainder + 191U * input_rate_hz_) / output_rate_hz;
@@ -138,10 +185,10 @@ DYKODAC_ITCM std::size_t PolyphaseUpsampler::process(
             const auto* frame = input + consumed * pcm_bytes_per_frame;
             const float left = decode_sample(frame);
             const float right = decode_sample(frame + 4U);
-            left_history_[slot] = left;
-            left_history_[slot + history_capacity_frames] = left;
-            right_history_[slot] = right;
-            right_history_[slot + history_capacity_frames] = right;
+            left_history[slot] = left;
+            left_history[slot + history_capacity_frames] = left;
+            right_history[slot] = right;
+            right_history[slot + history_capacity_frames] = right;
             ++source_next_index;
             ++consumed;
         }
@@ -154,15 +201,23 @@ DYKODAC_ITCM std::size_t PolyphaseUpsampler::process(
         const std::uint32_t phase_position = phase_remainder * phase_count;
         const auto phase = static_cast<std::size_t>(
             (phase_position + output_rate_hz / 2U) / output_rate_hz);
-        const auto* coefficients = &detail::polyphase_coefficients[phase * taps_per_phase];
+        const bool reverse_coefficients = phase > phase_count / 2U;
+        const std::size_t stored_phase = reverse_coefficients ? phase_count - phase : phase;
+        const auto* coefficients = &detail::polyphase_coefficients[stored_phase * taps_per_phase];
         const std::size_t history_slot = (static_cast<std::size_t>(source_position) +
                                           history_capacity_frames +
                                           static_cast<std::size_t>(first_tap_offset)) & history_mask;
         float left = 0.0F;
         float right = 0.0F;
-        convolve_stereo(left_history_.data() + history_slot,
-                        right_history_.data() + history_slot,
-                        coefficients, left, right);
+        if (reverse_coefficients) {
+            convolve_stereo_reversed(left_history + history_slot,
+                                     right_history + history_slot,
+                                     coefficients + taps_per_phase - 1U, left, right);
+        } else {
+            convolve_stereo(left_history + history_slot,
+                            right_history + history_slot,
+                            coefficients, left, right);
+        }
         store_sample(frame, saturate_sample(left));
         store_sample(frame + 4U, saturate_sample(right));
         phase_remainder += input_rate_hz_;
@@ -191,10 +246,10 @@ DYKODAC_ITCM std::size_t PolyphaseUpsampler::process(
                 const auto* frame = input + consumed * pcm_bytes_per_frame;
                 const float left = decode_sample(frame);
                 const float right = decode_sample(frame + 4U);
-                left_history_[slot] = left;
-                left_history_[slot + history_capacity_frames] = left;
-                right_history_[slot] = right;
-                right_history_[slot + history_capacity_frames] = right;
+                left_history[slot] = left;
+                left_history[slot + history_capacity_frames] = left;
+                right_history[slot] = right;
+                right_history[slot + history_capacity_frames] = right;
                 ++source_next_index;
                 ++consumed;
             }

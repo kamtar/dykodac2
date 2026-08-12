@@ -116,6 +116,8 @@ int main() {
     check(audio::usb_hs_packet_bytes(*audio::find_format(48'000U), 0U) == 48U, "48k packet size");
     check(audio::find_format(48'000U)->usb_hs_max_packet_bytes == 56U,
           "asynchronous endpoint allows one positive correction frame");
+    check(audio::PolyphaseUpsampler::taps_per_phase == 128U,
+          "real-time upsampler uses 128 taps per phase");
 
     audio::PolyphaseUpsampler upsampler;
     check(upsampler.configure(44'100U), "44.1 kHz upsampler configuration");
@@ -128,9 +130,10 @@ int main() {
     check(upsampler.position_numerator() == static_cast<std::uint64_t>(output_frames) * 44'100U,
           "44.1 kHz rational phase accumulator is exact");
     check(upsampler.configure(48'000U), "48 kHz upsampler configuration");
-    check(upsampler.input_frames_needed(192U) == 80U,
+    check(upsampler.input_frames_needed(192U) == 112U,
           "48 kHz phase scheduler includes the fixed FIR lookahead");
-    const std::size_t dc_input_frames = upsampler.input_frames_needed(192U);
+    constexpr std::size_t dc_output_frames = 1'536U;
+    const std::size_t dc_input_frames = upsampler.input_frames_needed(dc_output_frames);
     std::vector<std::uint8_t> dc_input(dc_input_frames * 8U, 0U);
     for (std::size_t frame = 0U; frame < dc_input_frames; ++frame) {
         dc_input[frame * 8U + 1U] = 0xFFU;
@@ -141,15 +144,15 @@ int main() {
         dc_input[frame * 8U + 7U] = 0x7FU;
     }
     std::fill(upsample_output.begin(), upsample_output.end(), 0U);
-    check(upsampler.process(dc_input.data(), dc_input_frames, upsample_output.data(), 192U) == 192U,
+    check(upsampler.process(dc_input.data(), dc_input_frames, upsample_output.data(), dc_output_frames) == dc_output_frames,
           "48 kHz upsampler produces a complete DC block");
-    check(upsample_output[160U * 8U + 3U] >= 0x7EU &&
-          upsample_output[160U * 8U + 7U] >= 0x7EU,
+    check(upsample_output[1'280U * 8U + 3U] >= 0x7EU &&
+          upsample_output[1'280U * 8U + 7U] >= 0x7EU,
           "polyphase DC response remains near unity after FIR warm-up");
 
-    // The production path stages one 192-frame block before convolution;
-    // large calls use the bounded streaming path. They must remain exactly
-    // equivalent across mirrored-history wrap boundaries.
+    // One-millisecond calls and large calls must remain exactly equivalent
+    // across mirrored-history wrap boundaries and complementary/reversed
+    // phase-kernel selection.
     constexpr std::size_t comparison_frames = 192U * 10U;
     audio::PolyphaseUpsampler full_call;
     audio::PolyphaseUpsampler blocked_call;

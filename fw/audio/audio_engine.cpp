@@ -22,7 +22,12 @@ constexpr std::uint32_t dma_irq_priority = 1U;
 // fixed DTCM coefficient bank and 8 KiB stack remain untouched; each completed
 // buffer is explicitly cleaned before eDMA reads it.
 alignas(32) std::uint8_t dma_audio[audio::AudioEngine::dma_buffer_count][1536]{};
-__attribute__((section(".dma"), aligned(32))) std::uint8_t upsampler_input[1024]{};
+// The first 48-kHz block needs 47 source advances plus the FIR's 64-frame
+// lookahead. Later one-millisecond refills need only 48 source frames.
+constexpr std::size_t maximum_upsampler_input_frames =
+    audio::PolyphaseUpsampler::taps_per_phase / 2U + 48U;
+__attribute__((section(".dma"), aligned(32)))
+std::uint8_t upsampler_input[maximum_upsampler_input_frames * 8U]{};
 std::uint8_t dma_index = 0U;
 edma_handle_t dma_handle{};
 // The SAI loop driver uses this handle's embedded TCD pool for its permanent

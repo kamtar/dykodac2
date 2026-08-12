@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Generate the checked-in binary32 FIR bank used by PolyphaseUpsampler.
 
-The bank contains 64 fractional-delay phases and one phase-1 endpoint used by
-nearest-phase rounding. It intentionally has no third-party dependencies.
+The bank stores phases 0 through 0.5. Phases above 0.5 are exact reversed
+kernels from the complementary stored phase. It intentionally has no
+third-party dependencies.
 """
 import math
 from pathlib import Path
 
 PHASES = 64
-TAPS = 64
+TAPS = 128
 CUTOFF = 0.47675             # cycles/input-sample
 KAISER_BETA = 10.0
 
@@ -47,11 +48,12 @@ def float_literal(value: float) -> str:
 
 
 def render() -> str:
-    rows = [phase_row(phase) for phase in range(PHASES + 1)]
+    stored_phases = PHASES // 2 + 1
+    rows = [phase_row(phase) for phase in range(stored_phases)]
     lines = ["#pragma once", "", "#include <array>", "#include <cstdint>", "",
              "namespace audio::detail {",
              "__attribute__((section(\".dtcm_coefficients\"), aligned(32)))", 
-             "inline const std::array<float, 65U * 64U> polyphase_coefficients{{"]
+             f"inline const std::array<float, {stored_phases}U * {TAPS}U> polyphase_coefficients{{{{"]
     for phase, row in enumerate(rows):
         lines.append(f"    // phase {phase} ({phase / PHASES:.8f} input samples)")
         lines.append("    " + ", ".join(float_literal(value) for value in row) + ",")
@@ -62,4 +64,4 @@ def render() -> str:
 if __name__ == "__main__":
     destination = Path(__file__).resolve().parents[1] / "audio" / "polyphase_coefficients.hpp"
     destination.write_text(render(), encoding="utf-8", newline="\n")
-    print(f"wrote {destination} ({(PHASES + 1) * TAPS} coefficients)")
+    print(f"wrote {destination} ({(PHASES // 2 + 1) * TAPS} coefficients)")

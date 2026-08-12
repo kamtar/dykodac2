@@ -13,11 +13,12 @@ class PolyphaseUpsampler {
 public:
     static constexpr std::uint32_t output_rate_hz = 192'000U;
     static constexpr std::size_t phase_count = 64U;
-    static constexpr std::size_t taps_per_phase = 64U;
-    // The 128-frame ring is mirrored in each channel so every 64-tap window
+    static constexpr std::size_t taps_per_phase = 128U;
+    // A one-window ring is mirrored in each channel so every 128-tap window
     // is contiguous, including the window that crosses the ring boundary.
-    static constexpr std::size_t history_capacity_frames = 128U;
+    static constexpr std::size_t history_capacity_frames = taps_per_phase;
     static_assert((history_capacity_frames & (history_capacity_frames - 1U)) == 0U);
+    static_assert((taps_per_phase & 3U) == 0U);
 
     void reset(std::uint32_t input_rate_hz) noexcept;
     bool configure(std::uint32_t input_rate_hz) noexcept;
@@ -39,8 +40,12 @@ private:
     static float decode_sample(const std::uint8_t* bytes) noexcept;
     static std::int32_t saturate_sample(float value) noexcept;
 
+#if defined(DYKODAC_HOST_TEST)
+    // Host tests construct independent converters. The target has one audio
+    // engine and keeps its much larger histories in a dedicated DTCM section.
     std::array<float, history_capacity_frames * 2U> left_history_{};
     std::array<float, history_capacity_frames * 2U> right_history_{};
+#endif
     std::uint32_t input_rate_hz_{0U};
     std::uint64_t source_next_index_{0U};
     std::uint64_t source_position_{0U};

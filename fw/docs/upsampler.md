@@ -9,32 +9,48 @@ from the fractional position, so input-rate changes naturally skip/select
 different phases rather than requiring a separate converter per rate. The
 nearest phase row is selected once per output sample. Phase rounding uses
 the endpoint row and bounds timing error to 1/128 of an input sample; the tap
-loop itself contains only native M7 single-precision FMAs. The complete bank
-is copied from the factory image into DTCM at startup, and the hot process
-function is copied into ITCM, so coefficient and instruction reads do not
-contend with XIP traffic.
+loop itself contains only native M7 single-precision FMAs. Fractional-delay
+kernels above phase 0.5 are exact reversals of their complementary lower-phase
+kernels, so only phases 0 through 32 are stored. The stored bank is copied from
+the factory image into DTCM at startup. The process function and its stereo FIR
+kernel run from ITCM.
 
 SAI/eDMA transfers use 192 output frames per block, exactly 1 ms at 192 kHz.
 
-The checked-in bank is 64 fractional phases plus a phase-1 endpoint, 64 taps
-per phase, binary32 coefficients, and a Kaiser window (`beta=10`, cutoff
-`0.47675` cycles/input-sample). It occupies 65 x 64 x 4 = 16,640 bytes in
-DTCM. Runtime history uses separate left/right 128-frame rings, each mirrored
-once to make every 64-tap window contiguous (2,048 bytes total); the 1,024-byte
-source staging buffer is also in DTCM. The Release map uses 20,556 of 65,504
-OCRAM bytes, 1,504 of 32 KiB ITCM, and DTCM through `0x20006000`; the fixed
-8 KiB stack occupies `0x20006000` through `0x20008000`.
+The checked-in bank represents 64 fractional phases plus the phase-1 endpoint,
+with 128 taps per phase, binary32 coefficients, and a Kaiser window (`beta=10`,
+cutoff `0.47675` cycles/input-sample). Its 33 non-redundant stored rows occupy
+33 x 128 x 4 = 16,896 bytes in DTCM. Runtime history uses separate left/right
+128-frame rings, each mirrored once to make every 128-tap window contiguous
+(2,048 bytes total); the worst-case 896-byte source staging buffer is also in
+DTCM.
 
-The inner loop performs 192,000 x 64 x 2 = 24.58 million sample MACs per
-second using the Cortex-M7 FPv5 hardware FPU. Binary32 exactly represents every
-24-bit input integer, phase selection occurs once per output, and convolution
-walks the power-of-two history ring without per-tap bounds checks. A larger
-phase bank or more taps should be benchmarked on hardware before adoption.
-The maintenance HID performance report exposes average, maximum, and last
-refill cycles plus the peak pending-refill depth.
+The standard RT1011 FlexRAM split remains unchanged: 32 KiB ITCM, 32 KiB DTCM,
+and 64 KiB OCRAM. The Release link uses 62,624 of 392,704 application-slot
+bytes, 24,684 of 65,504 OCRAM bytes, 22,784 of 32,768 DTCM bytes, and 1,984 of
+32,768 ITCM bytes. The fixed 8-KiB stack occupies `0x20006000` through
+`0x20008000`, leaving 1,792 DTCM bytes between linked sections and the stack.
+The boot manager and both 384-KiB application slots remain unchanged.
+
+The inner loop performs 192,000 x 128 x 2 = 49.15 million sample MACs per
+second using the 500-MHz Cortex-M7 FPv5 hardware FPU. Binary32 exactly
+represents every 24-bit input integer, phase selection occurs once per output,
+and convolution walks the power-of-two history ring without per-tap bounds
+checks. The filter needs 64 future input frames, adding about 1.45 ms at
+44.1 kHz or 1.33 ms at 48 kHz to the pipeline. The maintenance HID performance
+report exposes average, maximum, and last refill cycles plus the peak pending-
+refill depth.
+
+A 512-tap hardware experiment was rejected because its direct stereo FIR was
+projected from the measured 64-tap baseline to require about 816,000 average
+and 914,000 worst-case cycles per one-millisecond refill, exceeding the
+500,000-cycle deadline at 500 MHz. A 1024-tap direct FIR would be further over
+budget. The 128-tap design is the largest conservative step from that baseline;
+its actual target timing must still be confirmed through the performance
+report after flashing.
 
 `tools/generate_polyphase_coefficients.py` regenerates the exact checked-in
 header without third-party packages. Host tests cover complete-block output,
 the exact 44.1-kHz accumulator count, 48-kHz scheduling, DC response after FIR
-warm-up, bit-exact equivalence between the production and bounded streaming
-paths across history wraps, and CS4398 register mode writes.
+warm-up, bit-exact equivalence between one-millisecond and larger streaming
+calls across history wraps, and CS4398 register mode writes.
