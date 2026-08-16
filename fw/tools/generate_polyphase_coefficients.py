@@ -9,6 +9,8 @@ arm_rfft_fast_f32: DC, Nyquist, then interleaved real/imaginary bins.
 from __future__ import annotations
 
 import json
+import argparse
+import re
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +47,54 @@ def design_prototype() -> np.ndarray:
     # generated from these exact values (promoted back to binary64 for the
     # offline FFT), so direct and FFT tests never compare different filters.
     return prototype.astype(np.float32)
+
+
+def load_header_prototype(path: Path) -> tuple[np.ndarray, int]:
+    """Load a sequential float32 FIR header and its documented gain factor."""
+    text = path.read_text(encoding="utf-8")
+    count_match = re.search(r"#define\s+FIR_COEFFICIENT_COUNT\s+(\d+)u", text)
+    phase_match = re.search(r"#define\s+FIR_INTERPOLATION_PHASES\s+(\d+)u", text)
+    array_marker = "static const float fir_coefficients_fp32"
+    if count_match is None or phase_match is None or array_marker not in text:
+        raise ValueError(f"{path} is not a recognized FIR coefficient header")
+    array_start = text.index("{", text.index(array_marker)) + 1
+    array_end = text.index("};", array_start)
+    values = np.array([
+        float(value.rstrip("fF"))
+        for value in re.findall(
+            r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?[fF]?",
+            text[array_start:array_end],
+        )
+    ], dtype=np.float32)
+    declared_count = int(count_match.group(1))
+    if values.size != declared_count or declared_count != PROTOTYPE_TAPS:
+        raise ValueError(
+            f"{path} contains {values.size} taps, expected {declared_count} and "
+            f"project size {PROTOTYPE_TAPS}"
+        )
+    return values, int(phase_match.group(1))
+
+
+def load_generated_prototype(path: Path) -> np.ndarray:
+    """Load the effective float32 prototype emitted for host verification."""
+    text = path.read_text(encoding="utf-8")
+    marker = "prototype_coefficients{"
+    if marker not in text:
+        raise ValueError(f"{path} is not a generated prototype header")
+    array_start = text.index("{", text.index(marker)) + 1
+    array_end = text.index("};", array_start)
+    values = np.array([
+        float(value.rstrip("fF"))
+        for value in re.findall(
+            r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?[fF]?",
+            text[array_start:array_end],
+        )
+    ], dtype=np.float32)
+    if values.size != PROTOTYPE_TAPS:
+        raise ValueError(
+            f"{path} contains {values.size} taps, expected {PROTOTYPE_TAPS}"
+        )
+    return values
 
 
 def cmsis_packed_rfft(values: np.ndarray) -> np.ndarray:
@@ -150,8 +200,27 @@ def response_metrics(prototype: np.ndarray) -> dict[str, object]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--input",
+        type=Path,
+        help="sequential FIR header; its FIR_INTERPOLATION_PHASES gain is applied",
+    )
+    args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    prototype = design_prototype()
+    if args.input is None:
+        prototype = design_prototype()
+    else:
+        raw_prototype, interpolation_phases = load_header_prototype(args.input)
+        if interpolation_phases != PHASES:
+            raise ValueError(
+                f"input declares {interpolation_phases} interpolation phases, "
+                f"but this firmware is configured for {PHASES}x"
+            )
+        # The supplied header is the unscaled sequential FIR.  The current
+        # polyphase path is equivalent to zero-stuff interpolation, so apply
+        # the documented interpolation gain before partitioning its branches.
+        prototype = (raw_prototype * np.float32(interpolation_phases)).astype(np.float32)
     spectra = build_spectra(prototype)
     (root / "audio" / "fft_filter_spectra.hpp").write_text(
         render_spectra(spectra), encoding="utf-8", newline="\n")

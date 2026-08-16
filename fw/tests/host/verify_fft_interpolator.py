@@ -86,7 +86,9 @@ def reconstruction_report(h: np.ndarray, source_rate: float) -> dict[str, object
 
 
 def main() -> None:
-    h = generator.design_prototype().astype(np.float64)
+    h = generator.load_generated_prototype(
+        ROOT / "tests" / "host" / "fft_prototype_coefficients.hpp"
+    ).astype(np.float64)
     report = {
         "method": "exact checked-in float32 prototype; binary64 analysis",
         "response": {

@@ -9,12 +9,12 @@ remain byte-for-byte bypasses.
 
 ## Filter and convolution
 
-`tools/generate_polyphase_coefficients.py` designs the prototype in binary64
-as a Kaiser-windowed sinc on the 4x output grid. Its source-normalized cutoff is
+The imported sequential float32 FIR source declares four interpolation phases
+and no embedded interpolation gain. The command `tools/generate_polyphase_coefficients.py --input <header>` applies its documented x4 zero-stuff gain, then decomposes the
+effective taps on the 4x output grid. Its source-normalized cutoff is
 0.47677267573696145 cycles/source-sample (0.11919316893424036 on the output
-grid), Kaiser beta is 18, and all four phase branches are normalized to unity
-DC gain before conversion to the authoritative float32 prototype. The same
-normalized filter serves both clock families.
+grid); after the gain is applied, all four phase branches have unity DC gain.
+The same effective filter serves both clock families.
 
 Each 2048-tap branch is split into eight 256-tap partitions. A 512-point
 CMSIS-DSP packed real FFT implements uniform frequency-domain delay-line
@@ -72,15 +72,16 @@ output against binary64 direct convolution using the exact float32 prototype.
 It covers impulse, DC, 1/10/19/20 kHz, sweep, multitone, deterministic random
 input, all 256-frame partition boundaries, both DMA cadences, phase ordering,
 native bypass, and reset. The measured worst absolute FFT/direct difference is
-0.000463735 for test amplitudes of 1000 (4.64e-7 relative); the worst vector RMS
-difference is 7.36382e-5.
+0.000452063 for test amplitudes of 1000 (4.52e-7 relative); the worst vector RMS
+difference is 7.12953e-5.
 
 `tests/host/verify_fft_interpolator.py` writes detailed response and known
 high-rate reconstruction results to `docs/fft-interpolator-verification.json`.
-Passband ripple through 20 kHz at 44.1 kHz is 2.071e-6 dB, the 20 kHz first
-image is -163.14 dB relative, and worst stopband from 22.05 kHz is -149.87 dB
-for the exact float32 prototype. Known-reference multitone reconstruction RMS
-error is 7.34e-9 at 44.1 kHz and 7.44e-9 at 48 kHz.
+Passband ripple through 20 kHz at 44.1 kHz is 1.354e-5 dB, the 20 kHz first
+image is -138.66 dB relative at 44.1 kHz and -125.59 dB at 48 kHz, and the
+worst stopband from 22.05 kHz is -121.10 dB for the effective float32
+prototype. Known-reference multitone reconstruction RMS error is 9.12e-8 at
+44.1 kHz and 9.13e-8 at 48 kHz.
 
 Target CPU usage and worst refill cycles cannot be truthfully measured without
 running this image on the RT1011. The existing maintenance HID refill-timing

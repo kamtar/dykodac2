@@ -8,20 +8,20 @@
   "kaiser_beta": 18.0,
   "cutoff_cycles_per_source_sample": 0.47677267573696147,
   "cutoff_cycles_per_output_sample": 0.11919316893424037,
-  "dc_gain": 1.0,
+  "dc_gain": 0.9999999403953552,
   "phase_dc_gains": [
     1.0000001192092896,
-    1.0,
-    1.0,
-    1.0
+    1.000000238418579,
+    1.0000001192092896,
+    1.0000001192092896
   ],
   "symmetry_peak_error": 0.0,
-  "passband_ripple_db_0_to_20khz_at_44k1": 1.2203900791342447e-07,
+  "passband_ripple_db_0_to_20khz_at_44k1": 1.3537131627060257e-05,
   "response_db_at_source_fraction": {
-    "10khz_44k1": 8.870086693699655e-08,
-    "19khz_44k1": 5.962340290905925e-09,
-    "20khz_44k1": 2.484663774370192e-08,
-    "nyquist_44k1": -161.53605215337728
+    "10khz_44k1": -5.967970772108222e-07,
+    "19khz_44k1": -1.969542386404751e-06,
+    "20khz_44k1": -3.3578080979399134e-06,
+    "nyquist_44k1": -125.05857666880854
   },
-  "worst_stopband_db_from_22k05": -149.87172262732025
+  "worst_stopband_db_from_22k05": -121.10457627671872
 }
