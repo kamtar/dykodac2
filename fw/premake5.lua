@@ -51,53 +51,38 @@ local app_sources = {
     "app/app_controller.cpp", "audio/audio_engine.cpp", "audio/stream_buffer.cpp", "audio/feedback_controller.cpp",
     "audio/sample_rate.cpp", "audio/polyphase_upsampler.cpp", "board/clock_manager.cpp", "board/monotonic_timer.cpp", "board/output_relay.cpp",
     "board/target_board.cpp", "devices/dac.cpp", "platform/nxp/main.cpp", "platform/nxp/mpu_config.cpp",
-    "platform/nxp/rom_bootloader.cpp", "platform/nxp/flexio_dac_transport.cpp", "platform/nxp/boot_control.cpp",
-    "platform/nxp/update_layout.cpp", "usb/usb_device.cpp", "usb/usb_descriptors.cpp",
+    "platform/nxp/flexio_dac_transport.cpp", "usb/usb_device.cpp", "usb/usb_descriptors.cpp",
     "third_party/tinyusb/src/class/audio/audio_device.c", nxp_sdk .. "/drivers/fsl_gpio.c",
     nxp_sdk .. "/drivers/fsl_flexio.c", nxp_sdk .. "/drivers/fsl_flexio_spi.c", nxp_sdk .. "/drivers/fsl_dmamux.c",
     nxp_sdk .. "/drivers/fsl_edma.c", nxp_sdk .. "/drivers/fsl_sai.c", nxp_sdk .. "/drivers/fsl_sai_edma.c",
-    nxp_sdk .. "/startup/startup_mimxrt1011.c"
+    nxp_sdk .. "/startup/startup_mimxrt1011.c",
+    nxp_sdk .. "/xip/evkmimxrt1010_flexspi_nor_config.c",
+    nxp_sdk .. "/xip/fsl_flexspi_nor_boot.c"
 }
 for _,f in ipairs(tinyusb_core) do table.insert(app_sources,f) end
 for _,f in ipairs(sdk_core) do table.insert(app_sources,f) end
 for _,f in ipairs(cmsis_dsp_fft) do table.insert(app_sources,f) end
 
-local function app_project(name,suffix,address)
+local function app_project(name)
     project(name)
-        kind "ConsoleApp" targetname("dykodac2_" .. suffix) targetextension ".elf"
+        kind "ConsoleApp" targetname "dykodac2" targetextension ".elf"
         targetdir "build/gmake2/bin/%{cfg.buildcfg}" objdir("build/gmake2/obj/%{cfg.buildcfg}/" .. name)
         files(app_sources)
         target_common()
-        defines { "XIP_EXTERNAL_FLASH=1", "__MCUXPRESSO", "CFG_TUSB_CONFIG_FILE=\"usb/tusb_config.h\"" }
-        linkoptions { "-T../../platform/nxp/linker/dykodac2.ld", "-Wl,--defsym=APP_SLOT_BASE=" .. address,
-            "-Wl,-Map=bin/%{cfg.buildcfg}/dykodac2_" .. suffix .. ".map" }
+        defines { "XIP_EXTERNAL_FLASH=1", "XIP_BOOT_HEADER_ENABLE=1", "__MCUXPRESSO", "CFG_TUSB_CONFIG_FILE=\"usb/tusb_config.h\"" }
+        linkoptions { "-T../../platform/nxp/linker/dykodac2.ld", "-Wl,-Map=bin/%{cfg.buildcfg}/dykodac2.map" }
         postbuildcommands {
-            "arm-none-eabi-objcopy -O binary \"%{cfg.buildtarget.abspath}\" \"%{cfg.buildtarget.directory}/dykodac2_" .. suffix .. ".payload.bin\"",
-            "arm-none-eabi-objdump -d -S \"%{cfg.buildtarget.abspath}\" > \"%{cfg.buildtarget.directory}/dykodac2_" .. suffix .. ".lst\"",
+            "arm-none-eabi-objcopy -O binary \"%{cfg.buildtarget.abspath}\" \"%{cfg.buildtarget.directory}/dykodac2.bin\"",
+            "arm-none-eabi-objdump -d -S \"%{cfg.buildtarget.abspath}\" > \"%{cfg.buildtarget.directory}/dykodac2.lst\"",
             "arm-none-eabi-size \"%{cfg.buildtarget.abspath}\"" }
 end
-app_project("dykodac2_fw_a","a","0x60010000")
-app_project("dykodac2_fw_b","b","0x60070000")
-
-project "dykodac2_boot"
-    kind "ConsoleApp" targetname "dykodac2_boot" targetextension ".elf"
-    targetdir "build/gmake2/bin/%{cfg.buildcfg}" objdir "build/gmake2/obj/%{cfg.buildcfg}/dykodac2_boot"
-    files { "boot/startup.S", "boot/main.cpp", "boot/descriptors.cpp", "boot/flexspi_flash.cpp",
-        "platform/nxp/update_layout.cpp", "platform/nxp/sha256.cpp", "platform/nxp/mpu_config.cpp",
-        nxp_sdk .. "/xip/evkmimxrt1010_flexspi_nor_config.c", nxp_sdk .. "/xip/fsl_flexspi_nor_boot.c" }
-    for _,f in ipairs(tinyusb_core) do files { f } end
-    for _,f in ipairs(sdk_core) do files { f } end
-    target_common()
-    defines { "XIP_EXTERNAL_FLASH=1", "XIP_BOOT_HEADER_ENABLE=1", "CFG_TUSB_CONFIG_FILE=\"boot/tusb_config.h\"" }
-    linkoptions { "-T../../platform/nxp/linker/boot_manager.ld", "-Wl,-Map=bin/%{cfg.buildcfg}/dykodac2_boot.map" }
-    postbuildcommands { "arm-none-eabi-objcopy -O binary \"%{cfg.buildtarget.abspath}\" \"%{cfg.buildtarget.directory}/dykodac2_boot.bin\"",
-        "arm-none-eabi-size \"%{cfg.buildtarget.abspath}\"" }
+app_project("dykodac2_fw")
 
 project "dykodac2_host_tests"
     kind "ConsoleApp"
     targetdir "build/gmake2/bin/%{cfg.buildcfg}" objdir "build/gmake2/obj/%{cfg.buildcfg}/%{prj.name}"
     files { "app/app_controller.cpp", "audio/sample_rate.cpp", "audio/polyphase_upsampler.cpp", "audio/stream_buffer.cpp", "audio/feedback_controller.cpp",
-        "devices/dac.cpp", "platform/nxp/update_layout.cpp", "platform/nxp/sha256.cpp",
+        "devices/dac.cpp",
         "usb/usb_event_queue_host.cpp", "tests/host/**.cpp" }
     for _,f in ipairs(cmsis_dsp_fft) do files { f } end
     includedirs { ".", cmsis_dsp .. "/Include", cmsis_dsp .. "/PrivateInclude" }

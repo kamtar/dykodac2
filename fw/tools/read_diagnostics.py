@@ -38,8 +38,7 @@ STOP_REASONS = [
 ]
 EVENTS = [
     "None", "Mounted", "Detached", "Suspended", "Resumed", "Start", "Stop",
-    "Rate", "Controls", "Diagnostics", "EventTrace", "BootloaderArm",
-    "DmaDiagnostics", "UpdaterArm", "RefillTiming",
+    "Rate", "Controls", "Diagnostics", "EventTrace", "DmaDiagnostics", "RefillTiming",
 ]
 CONTROLS = ["None", "SampleRate", "Mute", "Volume", "InterfaceAlternate"]
 

@@ -1,10 +1,8 @@
 ENTRY(ResetISR)
-APP_SLOT_BASE = DEFINED(APP_SLOT_BASE) ? APP_SLOT_BASE : 0x60010000;
-APP_SLOT_SIZE = DEFINED(APP_SLOT_SIZE) ? APP_SLOT_SIZE : 0x60000;
 
 MEMORY
 {
-    FLASH (rx) : ORIGIN = APP_SLOT_BASE + 0x200, LENGTH = APP_SLOT_SIZE - 0x200
+    FLASH (rx) : ORIGIN = 0x60000000, LENGTH = 0x100000
     SRAM_OC (rwx) : ORIGIN = 0x20200000, LENGTH = 0xFFE0
     SRAM_DTC (rwx) : ORIGIN = 0x20000000, LENGTH = 32K
     SRAM_ITC (rwx) : ORIGIN = 0x00000000, LENGTH = 32K
@@ -12,6 +10,15 @@ MEMORY
 
 SECTIONS
 {
+    .boot_hdr : ALIGN(4)
+    {
+        FILL(0xff)
+        . = 0x400; KEEP(*(.boot_hdr.conf))
+        . = 0x1000; KEEP(*(.boot_hdr.ivt))
+        . = 0x1020; KEEP(*(.boot_hdr.boot_data))
+        . = 0x2000;
+    } > FLASH
+
     .text : ALIGN(4)
     {
         FILL(0xff)
@@ -82,7 +89,4 @@ SECTIONS
     ASSERT(__dtcm_coefficients_end__ <= _vStackBase, "DTCM FFT state overlaps the stack")
     ASSERT(SIZEOF(.fft_state_ocram) + SIZEOF(.bss) + SIZEOF(.data) + SIZEOF(.noinit) <= LENGTH(SRAM_OC), "OCRAM overflow")
     ASSERT(SIZEOF(.itcm_text) <= LENGTH(SRAM_ITC), "ITCM hot code exceeds ITCM")
-    _image_start = LOADADDR(.text);
-    _image_end = LOADADDR(.dtcm_coefficients) + SIZEOF(.dtcm_coefficients);
-    _image_size = _image_end - _image_start;
 }

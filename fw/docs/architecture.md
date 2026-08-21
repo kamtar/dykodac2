@@ -12,7 +12,7 @@ The currently implemented boundary contains:
   48 kHz input selects 192 kHz/24.576 MHz, both using the exact-4x,
   8192-tap binary32 partitioned-FFT upsampler;
 - integer UAC2 attenuation conversion and typed DAC commands;
-- safety outputs for boot, preparation, playback, switching, stop, and fault;
+- safety outputs for startup, preparation, playback, switching, stop, and fault;
 - native tests that verify the core invariants without NXP registers.
 
 The target build now reproduces the legacy flash/RAM map, startup vector table,

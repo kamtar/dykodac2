@@ -17,15 +17,14 @@ mingw32-make -C build/gmake2 dykodac2_host_tests config=hosttest
 build/gmake2/bin/HostTest/dykodac2_host_tests.exe
 ```
 
-## Build the RT1011 USB DAC and A/B updater
+## Build the RT1011 USB DAC firmware
 
 ```powershell
-build.bat 1
+build.bat
 ```
 
-The optional argument is the packaged firmware version and defaults to `1`.
-The script builds all Release firmware targets, creates the factory and HID
-update packages, then builds and runs the host tests.
+The script builds the single directly bootable Release firmware image, then
+builds and runs the host tests.
 
 For a clean build, remove only the generated `build/gmake2` tree and rebuild
 everything with:
@@ -34,15 +33,12 @@ everything with:
 build.bat clean
 ```
 
-An optional version may follow `clean`, for example `build.bat clean 5`.
 The archived known-good image under `build/recovery` is preserved.
 
-This produces `dykodac2_factory.elf` and `dykodac2_factory.bin` for the one-time
-layout migration and `dykodac2.dykoupd` for subsequent driverless HID updates. See
-[`docs/firmware-update.md`](docs/firmware-update.md) before programming the
-factory image; the first board test must confirm the exact NOR command set.
+This produces `dykodac2.elf` and `dykodac2.bin` in the same factory-style NOR
+layout. Program `dykodac2.bin` at NOR offset zero with the NXP bootloader app.
 
-This produces `.elf`, `.bin`, `.hex`, `.map`, and `.lst` files. The diagnostic
+This produces `.elf`, `.bin`, `.map`, and `.lst` files. The diagnostic
 image holds the relay open and analog power disabled, configures the CS4398 over
 2 MHz FlexIO SPI with cooperative deadlines, and continuously sends 44.1 kHz
 stereo silence over SAI1/eDMA. The DAC remains digitally muted.
