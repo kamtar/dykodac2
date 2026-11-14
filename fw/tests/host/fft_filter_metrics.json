@@ -1,27 +1,67 @@
 {
-  "prototype_taps": 8192,
-  "phase_taps": 2048,
-  "phases": 4,
-  "partition_size": 256,
-  "fft_size": 512,
-  "partitions_per_phase": 8,
-  "kaiser_beta": 18.0,
-  "cutoff_cycles_per_source_sample": 0.47677267573696147,
-  "cutoff_cycles_per_output_sample": 0.11919316893424037,
-  "dc_gain": 0.9999999403953552,
-  "phase_dc_gains": [
-    1.0000001192092896,
-    1.000000238418579,
-    1.0000001192092896,
-    1.0000001192092896
-  ],
-  "symmetry_peak_error": 0.0,
-  "passband_ripple_db_0_to_20khz_at_44k1": 1.3537131627060257e-05,
-  "response_db_at_source_fraction": {
-    "10khz_44k1": -5.967970772108222e-07,
-    "19khz_44k1": -1.969542386404751e-06,
-    "20khz_44k1": -3.3578080979399134e-06,
-    "nyquist_44k1": -125.05857666880854
+  "stage1": {
+    "taps_on_2x_grid": 1024,
+    "kaiser_beta": 15.0,
+    "cutoff_cycles_per_source_sample": 0.4906869304126304,
+    "partitions_per_phase": 2,
+    "fft_size": 512,
+    "phase_dc_gains": [
+      0.9999999583224964,
+      0.9999999583224964
+    ],
+    "symmetry_peak_error": 0.0
   },
-  "worst_stopband_db_from_22k05": -121.10457627671872
+  "stage2": {
+    "taps_on_4x_grid": 63,
+    "kaiser_beta": 15.0,
+    "nonzero_taps": 33
+  },
+  "dac_compensation": "CS4398 quad-speed fast roll-off, DS568F3 figure 39",
+  "composite_taps_on_4x_grid": 2109,
+  "group_delay_output_samples": 1054.0,
+  "edges_cycles_per_source_sample": {
+    "passband_edge_minus_0p03_db": 0.48480701446533203,
+    "minus_6_db": 0.49068546295166016,
+    "minus_100_db": 0.49931812286376953,
+    "minus_130_db": 0.49990367889404297
+  },
+  "worst_stopband_db": {
+    "from_source_nyquist_to_output_nyquist": -141.03408541256937,
+    "first_image_0p5_to_1p5": -141.03408541256937,
+    "stage2_image_1p5_to_2p0": -146.5921756844362
+  },
+  "source_44100": {
+    "fir_deviation_db_0_to_20khz": [
+      -0.009994383648082897,
+      0.006412670262014663
+    ],
+    "fir_plus_dac_deviation_db_0_to_20khz": [
+      -7.315555223276677e-06,
+      2.8674939648680903e-05
+    ],
+    "dac_alone_deviation_db_0_to_20khz": [
+      -0.006410553236226612,
+      0.009999999999953959
+    ],
+    "passband_edge_minus_0p03_db_hz": 21379.989337921143,
+    "minus_130_db_edge_hz": 22045.752239227295,
+    "group_delay_ms": 5.975056689342404
+  },
+  "source_48000": {
+    "fir_deviation_db_0_to_20khz": [
+      -0.009994383648082897,
+      -2.7305836798095843e-07
+    ],
+    "fir_plus_dac_deviation_db_0_to_20khz": [
+      -7.315555223276677e-06,
+      1.4492534307204474e-05
+    ],
+    "dac_alone_deviation_db_0_to_20khz": [
+      0.0,
+      0.009999999999953959
+    ],
+    "passband_edge_minus_0p03_db_hz": 23270.736694335938,
+    "minus_130_db_edge_hz": 23995.376586914062,
+    "group_delay_ms": 5.489583333333333
+  }
 }

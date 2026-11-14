@@ -9,9 +9,10 @@ The currently implemented boundary contains:
 - a named compile-time board map preserving prototype mappings;
 - one source of truth for the two initial audio formats;
 - dual-family DAC output: 44.1 kHz input selects 176.4 kHz/22.5792 MHz and
-  48 kHz input selects 192 kHz/24.576 MHz, both using the exact-4x,
-  8192-tap binary32 partitioned-FFT upsampler;
-- integer UAC2 attenuation conversion and typed DAC commands;
+  48 kHz input selects 192 kHz/24.576 MHz, both using the exact-4x
+  two-stage binary32 interpolator (partitioned-FFT stage, then half-band);
+- host volume as a dithered MCU gain, with the DAC attenuation held at a
+  fixed protective ceiling, and typed DAC commands;
 - safety outputs for startup, preparation, playback, switching, stop, and fault;
 - native tests that verify the core invariants without NXP registers.
 

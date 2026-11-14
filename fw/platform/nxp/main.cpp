@@ -52,6 +52,12 @@ struct Runtime {
     StopReason stop_reason{StopReason::None};
 };
 
+// Host volume is an MCU gain; the DAC attenuation registers only ever hold
+// this fixed safety ceiling (see config/board_config.hpp).
+bool apply_dac_ceiling(Runtime& r) {
+    return r.dac.set_attenuation(config::board::dac_ceiling_db_8_8);
+}
+
 bool reached(std::uint32_t now, std::uint32_t deadline) {
     return static_cast<std::int32_t>(now - deadline) >= 0;
 }
@@ -141,6 +147,9 @@ void run_start(Runtime& r, std::uint32_t now) {
         if (!reached(now, r.deadline)) break;
         r.clocks.mark_stable();
         if (!r.dac.configure_format(*r.desired)) { safe_stop(r, true, StopReason::DacConfigure); break; }
+        // Re-assert the fixed ceiling with every DAC format (re)configuration,
+        // always before the unmute in the Stable step.
+        if (!apply_dac_ceiling(r)) { safe_stop(r, true, StopReason::VolumeControl); break; }
         if (!r.engine.start_silence(*r.desired)) { safe_stop(r, true, StopReason::EngineStart); break; }
         r.active = r.desired;
         if (r.app.state() == app::State::SwitchingRate) r.app.dispatch(app::Event::StreamRequested);
@@ -284,6 +293,8 @@ int main() {
     alignas(Runtime) static std::uint8_t runtime_storage[sizeof(Runtime)];
     Runtime& runtime = *::new (static_cast<void*>(runtime_storage)) Runtime;
     runtime.relay.initialize_safe();
+    // Start from the device's current host volume, never unity by accident.
+    runtime.engine.set_volume_db(runtime.usb.controls().volume_db_8_8);
     runtime.clocks.initialize_safe();
     if (!board::MonotonicTimer::initialize(SystemCoreClock)) for (;;) __asm volatile("wfi");
     runtime.app.dispatch(app::Event::Initialize);
@@ -300,7 +311,14 @@ int main() {
             runtime.active = runtime.desired;
             runtime.feedback.reset(*runtime.active, audio::StreamBuffer::capacity_bytes / 2U);
             if (!runtime.usb.initialize(runtime.stream, runtime.feedback)) { safe_stop(runtime, true, StopReason::UsbInit); }
-            else { runtime.usb_ready = true; runtime.usb.set_active_format(*runtime.active); runtime.app.dispatch(app::Event::Initialized); }
+            else {
+                runtime.usb_ready = true;
+                runtime.usb.set_active_format(*runtime.active);
+                runtime.app.dispatch(app::Event::Initialized);
+                // First DAC attenuation write after bootstrap: the fixed
+                // ceiling, long before the first unmute.
+                if (!apply_dac_ceiling(runtime)) safe_stop(runtime, true, StopReason::VolumeControl);
+            }
         }
         if (runtime.usb_ready) runtime.usb.task();
         for (usb::EventRecord usb_event = runtime.usb.take_event(); usb_event.event != usb::Event::None;
@@ -339,8 +357,10 @@ int main() {
             break;
         case usb::Event::Controls:
             if (usb_event.control == usb::Control::Volume) {
+                // Host volume never touches DAC registers 05h/06h; it only
+                // retargets the MCU gain ramp (main context, as is process()).
                 const auto volume = static_cast<std::int16_t>(static_cast<std::int32_t>(usb_event.value));
-                if (!runtime.dac.set_attenuation(volume)) safe_stop(runtime, true, StopReason::VolumeControl);
+                runtime.engine.set_volume_db(volume);
             } else if (usb_event.control == usb::Control::Mute) {
                 if (usb_event.value != 0U) { runtime.relay.disconnect(); runtime.dac.set_mute(true); }
                 else if (runtime.stream_requested) begin_start(runtime, now);

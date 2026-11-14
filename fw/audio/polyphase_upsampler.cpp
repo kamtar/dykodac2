@@ -1,7 +1,5 @@
 #include "audio/polyphase_upsampler.hpp"
 
-#include "audio/fft_filter_spectra.hpp"
-
 extern "C" {
 #include "arm_common_tables.h"
 #include "arm_const_structs.h"
@@ -17,6 +15,7 @@ constexpr std::size_t channels = 2U;
 constexpr std::size_t pcm_bytes_per_frame = 8U;
 constexpr std::size_t packed_bytes_per_frame = 6U;
 using PcmWord = std::uint32_t __attribute__((may_alias));
+using Upsampler = PolyphaseUpsampler;
 
 #if defined(DYKODAC_HOST_TEST)
 #define DYKODAC_FFT_HOT
@@ -28,30 +27,42 @@ using PcmWord = std::uint32_t __attribute__((may_alias));
 #define DYKODAC_OCRAM __attribute__((section(".fft_state_ocram"), aligned(32)))
 #endif
 
-// The two channels have independent X histories, while all four phase filters
-// share each channel FFT. Packed RFFT storage keeps the FDL at exactly 32 KiB.
-DYKODAC_OCRAM std::array<float, channels * PolyphaseUpsampler::partition_count *
-                                      PolyphaseUpsampler::fft_size> fft_history{};
+// The two channels have independent X histories, while both stage-1 phase
+// filters share each channel FFT. Packed RFFT storage: 2 x partitions x 512.
+DYKODAC_OCRAM std::array<float, channels * Upsampler::partition_count *
+                                      Upsampler::fft_size> fft_history{};
+// Stage-1 output u[] per channel, preceded by the half-band history:
+//   [halfband_history_frames previous u | stage1_block_frames current u]
+// u[2k + p] is stage-1 phase p, sample k of the current source block.
+constexpr std::size_t stage2_stride =
+    Upsampler::halfband_history_frames + Upsampler::stage1_block_frames;
+DYKODAC_OCRAM std::array<float, channels * stage2_stride> stage2_buffer{};
 // The main packed queue stays in OCRAM; a small DTCM extension provides the
 // full reservation needed while the preceding result block is still draining.
-DYKODAC_OCRAM std::array<std::uint8_t, PolyphaseUpsampler::ocram_output_queue_frames *
+DYKODAC_OCRAM std::array<std::uint8_t, Upsampler::ocram_output_queue_frames *
                                       packed_bytes_per_frame> output_queue{};
 DYKODAC_DTCM std::array<std::uint8_t,
-    (PolyphaseUpsampler::output_queue_frames - PolyphaseUpsampler::ocram_output_queue_frames) *
+    (Upsampler::output_queue_frames - Upsampler::ocram_output_queue_frames) *
     packed_bytes_per_frame> output_queue_extension{};
 
-DYKODAC_DTCM std::array<float, channels * PolyphaseUpsampler::partition_size> input_block{};
-DYKODAC_DTCM std::array<float, channels * PolyphaseUpsampler::fft_size> spectral_accumulator{};
-DYKODAC_DTCM std::array<float, PolyphaseUpsampler::fft_size> fft_scratch{};
-DYKODAC_DTCM std::array<float, PolyphaseUpsampler::phase_count * channels *
-                                     PolyphaseUpsampler::partition_size> ola_overlap{};
+DYKODAC_DTCM std::array<float, channels * Upsampler::partition_size> input_block{};
+DYKODAC_DTCM std::array<float, channels * Upsampler::fft_size> spectral_accumulator{};
+DYKODAC_DTCM std::array<float, Upsampler::fft_size> fft_scratch{};
+DYKODAC_DTCM std::array<float, Upsampler::stage1_phase_count * channels *
+                                     Upsampler::partition_size> ola_overlap{};
+// Zero-wait copy of the half-band branch (the generated table lives in XIP).
+DYKODAC_DTCM std::array<float, Upsampler::halfband_branch_taps> halfband_taps{};
 
 arm_rfft_fast_instance_f32 fft_instance{};
 
 #if defined(DYKODAC_HOST_TEST)
-std::array<float, PolyphaseUpsampler::output_queue_frames * channels> debug_output_queue{};
-std::array<float, PolyphaseUpsampler::output_queue_frames * channels> last_float_output{};
+std::array<float, Upsampler::output_queue_frames * channels> debug_output_queue{};
+std::array<float, Upsampler::output_queue_frames * channels> last_float_output{};
+std::array<float, Upsampler::stage1_block_frames * channels> debug_stage1_block{};
 #endif
+
+constexpr std::uint32_t dither_seed_left = 0x9E37'79B9U;
+constexpr std::uint32_t dither_seed_right = 0x7F4A'7C15U;
 
 inline float decode_sample(const std::uint8_t* bytes) noexcept {
     const auto left_justified = static_cast<std::int32_t>(
@@ -60,28 +71,72 @@ inline float decode_sample(const std::uint8_t* bytes) noexcept {
     return static_cast<float>(left_justified >> 8U);
 }
 
-inline std::int32_t saturate_sample(float value) noexcept {
-    if (value >= 8'388'607.0F) return 0x007F'FFFF;
-    if (value <= -8'388'608.0F) return -0x0080'0000;
-    return static_cast<std::int32_t>(value + (value < 0.0F ? -0.5F : 0.5F));
+// round_half_away(value + dither) saturated to signed 24 bit: the only
+// quantisation in the 4x path. binary32 resolves only 0.5 LSB above 2^22, so
+// adding the dither directly to value would itself quantise the dither. Split
+// value into its exact integer part and exact fraction first; the dither is
+// added to the small fraction at full precision and the integer offset is
+// rounded half away from zero with the sign of the complete sum.
+inline std::int32_t quantise_sample(float value, float dither) noexcept {
+    constexpr std::int32_t maximum = 0x007F'FFFF;
+    constexpr std::int32_t minimum = -0x0080'0000;
+    // |dither| < 1, so these bounds always saturate and keep the integer
+    // conversion below in range.
+    if (value >= 8'388'609.0F) return maximum;
+    if (value <= -8'388'610.0F) return minimum;
+    const auto whole = static_cast<std::int32_t>(value);          // exact, toward zero
+    const float fraction = (value - static_cast<float>(whole)) + dither; // |fraction| < 2
+    // IEEE addition never flips the sign of a non-zero exact sum.
+    const bool negative = static_cast<float>(whole) + fraction < 0.0F;
+    std::int32_t offset;
+    if (negative) {
+        const float shifted = fraction - 0.5F;
+        offset = static_cast<std::int32_t>(shifted);               // toward zero
+        if (static_cast<float>(offset) < shifted) ++offset;        // ceil
+    } else {
+        const float shifted = fraction + 0.5F;
+        offset = static_cast<std::int32_t>(shifted);
+        if (static_cast<float>(offset) > shifted) --offset;        // floor
+    }
+    const std::int32_t sample = whole + offset;
+    if (sample > maximum) return maximum;
+    if (sample < minimum) return minimum;
+    return sample;
+}
+
+inline std::uint32_t xorshift32(std::uint32_t& state) noexcept {
+    std::uint32_t x = state;
+    x ^= x << 13U;
+    x ^= x >> 17U;
+    x ^= x << 5U;
+    state = x;
+    return x;
+}
+
+// TPDF dither in 24-bit LSB units: the difference of two independent uniform
+// [0, 1) values with 24-bit resolution, so the result lies in (-1, 1) and is
+// computed exactly (|a - b| < 2^24).
+inline float tpdf_dither(std::uint32_t& state) noexcept {
+    const auto a = static_cast<std::int32_t>(xorshift32(state) >> 8U);
+    const auto b = static_cast<std::int32_t>(xorshift32(state) >> 8U);
+    return static_cast<float>(a - b) * (1.0F / 16'777'216.0F);
 }
 
 inline std::size_t history_offset(std::size_t channel, std::size_t partition) noexcept {
-    return (channel * PolyphaseUpsampler::partition_count + partition) *
-           PolyphaseUpsampler::fft_size;
+    return (channel * Upsampler::partition_count + partition) * Upsampler::fft_size;
 }
 
 inline std::size_t overlap_offset(std::size_t phase, std::size_t channel) noexcept {
-    return (phase * channels + channel) * PolyphaseUpsampler::partition_size;
+    return (phase * channels + channel) * Upsampler::partition_size;
 }
 
 inline void store_packed_queue(std::size_t frame, std::size_t channel,
                                std::int32_t sample) noexcept {
     const auto word = static_cast<std::uint32_t>(sample) & 0x00FF'FFFFU;
-    auto* const frame_data = frame < PolyphaseUpsampler::ocram_output_queue_frames ?
+    auto* const frame_data = frame < Upsampler::ocram_output_queue_frames ?
         output_queue.data() + frame * packed_bytes_per_frame :
         output_queue_extension.data() +
-            (frame - PolyphaseUpsampler::ocram_output_queue_frames) * packed_bytes_per_frame;
+            (frame - Upsampler::ocram_output_queue_frames) * packed_bytes_per_frame;
     auto* const destination = frame_data + channel * 3U;
     destination[0] = static_cast<std::uint8_t>(word);
     destination[1] = static_cast<std::uint8_t>(word >> 8U);
@@ -89,10 +144,10 @@ inline void store_packed_queue(std::size_t frame, std::size_t channel,
 }
 
 inline void load_packed_queue(std::size_t frame, std::uint8_t* destination) noexcept {
-    const auto* const source = frame < PolyphaseUpsampler::ocram_output_queue_frames ?
+    const auto* const source = frame < Upsampler::ocram_output_queue_frames ?
         output_queue.data() + frame * packed_bytes_per_frame :
         output_queue_extension.data() +
-            (frame - PolyphaseUpsampler::ocram_output_queue_frames) * packed_bytes_per_frame;
+            (frame - Upsampler::ocram_output_queue_frames) * packed_bytes_per_frame;
     destination[0] = 0U;
     destination[1] = source[0];
     destination[2] = source[1];
@@ -117,21 +172,34 @@ void PolyphaseUpsampler::reset(std::uint32_t input_rate_hz,
     input_fill_ = 0U;
     fft_history_head_ = 0U;
     job_history_head_ = 0U;
-    active_phase_ = phase_count;
+    active_slice_ = slices_per_block;
     output_read_ = 0U;
     output_write_ = 0U;
     output_available_ = 0U;
+    block_queue_ok_ = false;
+    // A stream restart must never change loudness: keep the target and snap
+    // the applied gain to it (the restart begins with startup zeros).
+    gain_ = gain_target_;
+    gain_step_ = output_rate_hz != 0U ?
+        1.0F / (gain_ramp_seconds * static_cast<float>(output_rate_hz)) : 1.0F;
+    dither_state_[0] = dither_seed_left;
+    dither_state_[1] = dither_seed_right;
     fft_history.fill(0.0F);
+    stage2_buffer.fill(0.0F);
     output_queue.fill(0U);
     output_queue_extension.fill(0U);
     input_block.fill(0.0F);
     spectral_accumulator.fill(0.0F);
     fft_scratch.fill(0.0F);
     ola_overlap.fill(0.0F);
+    for (std::size_t tap = 0U; tap < halfband_branch_taps; ++tap)
+        halfband_taps[tap] = detail::halfband_branch[tap];
 #if defined(DYKODAC_HOST_TEST)
     debug_output_queue.fill(0.0F);
     last_float_output.fill(0.0F);
+    debug_stage1_block.fill(0.0F);
     last_float_frames_ = 0U;
+    stage1_blocks_ = 0U;
 #endif
     // Fixed-size initialization avoids linking unused FFT-size initializers.
     fft_instance.Sint = arm_cfft_sR_f32_len256;
@@ -149,6 +217,13 @@ bool PolyphaseUpsampler::configure(std::uint32_t input_rate_hz,
     return true;
 }
 
+void PolyphaseUpsampler::set_gain_target(float linear) noexcept {
+    // The negated comparison also maps NaN to silence.
+    if (!(linear > 0.0F)) linear = 0.0F;
+    if (linear > 1.0F) linear = 1.0F;
+    gain_target_ = linear;
+}
+
 std::size_t PolyphaseUpsampler::input_frames_needed(std::size_t output_frames) const noexcept {
     if (input_rate_hz_ == 0U || output_frames == 0U) return 0U;
     if (!exact_4x_) return output_frames;
@@ -156,7 +231,7 @@ std::size_t PolyphaseUpsampler::input_frames_needed(std::size_t output_frames) c
 }
 
 DYKODAC_FFT_HOT bool PolyphaseUpsampler::begin_fft_block() noexcept {
-    if (input_fill_ != partition_size || active_phase_ != phase_count) return false;
+    if (input_fill_ != partition_size || active_slice_ != slices_per_block) return false;
     job_history_head_ = fft_history_head_;
     for (std::size_t channel = 0U; channel < channels; ++channel) {
         const auto input_base = channel * partition_size;
@@ -169,7 +244,7 @@ DYKODAC_FFT_HOT bool PolyphaseUpsampler::begin_fft_block() noexcept {
     }
     fft_history_head_ = (fft_history_head_ + 1U) & (partition_count - 1U);
     input_fill_ = 0U;
-    active_phase_ = 0U;
+    active_slice_ = 0U;
     return true;
 }
 
@@ -178,9 +253,9 @@ void PolyphaseUpsampler::append_input(const std::uint8_t* input,
     if (input == nullptr) return;
     for (std::size_t frame = 0U; frame < input_frames; ++frame) {
         if (input_fill_ == partition_size) {
-            // With the production 1 ms cadence the four phase slices finish
-            // before another 256-sample block can fill. Do not overwrite a
-            // full block if a caller violates that bounded schedule.
+            // With the production 1 ms cadence the four slices finish before
+            // another 256-sample block can fill. Do not overwrite a full
+            // block if a caller violates that bounded schedule.
             if (!begin_fft_block()) break;
         }
         input_block[input_fill_] = decode_sample(input + frame * pcm_bytes_per_frame);
@@ -188,13 +263,11 @@ void PolyphaseUpsampler::append_input(const std::uint8_t* input,
             decode_sample(input + frame * pcm_bytes_per_frame + 4U);
         ++input_fill_;
     }
-    if (input_fill_ == partition_size && active_phase_ == phase_count)
+    if (input_fill_ == partition_size && active_slice_ == slices_per_block)
         (void)begin_fft_block();
 }
 
-DYKODAC_FFT_HOT void PolyphaseUpsampler::process_one_phase() noexcept {
-    if (active_phase_ >= phase_count) return;
-    const std::size_t phase = active_phase_;
+DYKODAC_FFT_HOT void PolyphaseUpsampler::stage1_slice(std::size_t phase) noexcept {
     auto* const left_accumulator = spectral_accumulator.data();
     auto* const right_accumulator = spectral_accumulator.data() + fft_size;
     std::memset(spectral_accumulator.data(), 0, spectral_accumulator.size() * sizeof(float));
@@ -228,32 +301,115 @@ DYKODAC_FFT_HOT void PolyphaseUpsampler::process_one_phase() noexcept {
         }
     }
 
-    const std::size_t free_frames = output_queue_frames - output_available_;
-    const bool queue_has_room = free_frames >= partition_size * phase_count;
     for (std::size_t channel = 0U; channel < channels; ++channel) {
         auto* const accumulator = channel == 0U ? left_accumulator : right_accumulator;
         arm_rfft_fast_f32(&fft_instance, accumulator, fft_scratch.data(), 1U);
         auto* const overlap = ola_overlap.data() + overlap_offset(phase, channel);
-        if (queue_has_room) {
-            for (std::size_t sample = 0U; sample < partition_size; ++sample) {
-                const float value = fft_scratch[sample] + overlap[sample];
-                const std::size_t queue_frame =
-                    (output_write_ + sample * phase_count + phase) % output_queue_frames;
-                store_packed_queue(queue_frame, channel, saturate_sample(value));
-#if defined(DYKODAC_HOST_TEST)
-                debug_output_queue[queue_frame * channels + channel] = value;
-#endif
-            }
-        }
+        // Stage-1 phases interleave in time on the 2x grid.
+        auto* const u = stage2_buffer.data() + channel * stage2_stride +
+                        halfband_history_frames + phase;
+        for (std::size_t sample = 0U; sample < partition_size; ++sample)
+            u[sample * stage1_phase_count] = fft_scratch[sample] + overlap[sample];
         std::memcpy(overlap, fft_scratch.data() + partition_size,
                     partition_size * sizeof(float));
     }
-
-    ++active_phase_;
-    if (active_phase_ == phase_count && queue_has_room) {
-        output_write_ = (output_write_ + partition_size * phase_count) % output_queue_frames;
-        output_available_ += partition_size * phase_count;
+#if defined(DYKODAC_HOST_TEST)
+    if (phase + 1U == stage1_phase_count) {
+        for (std::size_t frame = 0U; frame < stage1_block_frames; ++frame)
+            for (std::size_t channel = 0U; channel < channels; ++channel)
+                debug_stage1_block[frame * channels + channel] =
+                    stage2_buffer[channel * stage2_stride + halfband_history_frames + frame];
+        ++stage1_blocks_;
     }
+#endif
+}
+
+__attribute__((always_inline)) inline float PolyphaseUpsampler::next_gain() noexcept {
+    // Per-output-frame linear slew toward the target; both channels share it.
+    if (gain_ < gain_target_) {
+        gain_ += gain_step_;
+        if (gain_ > gain_target_) gain_ = gain_target_;
+    } else if (gain_ > gain_target_) {
+        gain_ -= gain_step_;
+        if (gain_ < gain_target_) gain_ = gain_target_;
+    }
+    return gain_;
+}
+
+DYKODAC_FFT_HOT void PolyphaseUpsampler::stage2_slice(std::size_t half) noexcept {
+    // Readers only consume published frames, so the next 1024 queue frames
+    // after output_write_ are free whenever this holds. Reading between the
+    // two stage-2 slices only increases free space, so the first half decides
+    // for the whole block.
+    if (half == 0U)
+        block_queue_ok_ = output_queue_frames - output_available_ >= block_output_frames;
+    const bool store = block_queue_ok_;
+    const float* const taps = halfband_taps.data();
+    // Index u[m - j] as base[history + m - j]; history >= every j, so the
+    // index never goes below the start of the channel buffer.
+    const float* const left_base = stage2_buffer.data();
+    const float* const right_base = left_base + stage2_stride;
+    const std::size_t first = half * stage2_slice_frames;
+    for (std::size_t m = first; m < first + stage2_slice_frames; ++m) {
+        // y[2m] = sum_j h[j] u[m - j]
+        float left_even = 0.0F;
+        float right_even = 0.0F;
+        for (std::size_t tap = 0U; tap < halfband_branch_taps; ++tap) {
+            left_even += taps[tap] * left_base[halfband_history_frames + m - tap];
+            right_even += taps[tap] * right_base[halfband_history_frames + m - tap];
+        }
+        // y[2m + 1] = u[m - delay], exact pass-through.
+        const float left_odd = left_base[halfband_history_frames + m - halfband_delay_frames];
+        const float right_odd = right_base[halfband_history_frames + m - halfband_delay_frames];
+
+        const std::size_t even_frame = (output_write_ + 2U * m) % output_queue_frames;
+        const std::size_t odd_frame = (output_write_ + 2U * m + 1U) % output_queue_frames;
+        // value * gain + TPDF dither, then round/saturate to 24 bit. Dither
+        // is drawn for every frame (also at gain 1 and on silence) so both
+        // channel sequences stay independent of the queue state.
+        const float even_gain = next_gain();
+        const std::int32_t left_even_out =
+            quantise_sample(left_even * even_gain, tpdf_dither(dither_state_[0]));
+        const std::int32_t right_even_out =
+            quantise_sample(right_even * even_gain, tpdf_dither(dither_state_[1]));
+        const float odd_gain = next_gain();
+        const std::int32_t left_odd_out =
+            quantise_sample(left_odd * odd_gain, tpdf_dither(dither_state_[0]));
+        const std::int32_t right_odd_out =
+            quantise_sample(right_odd * odd_gain, tpdf_dither(dither_state_[1]));
+        if (store) {
+            store_packed_queue(even_frame, 0U, left_even_out);
+            store_packed_queue(even_frame, 1U, right_even_out);
+            store_packed_queue(odd_frame, 0U, left_odd_out);
+            store_packed_queue(odd_frame, 1U, right_odd_out);
+#if defined(DYKODAC_HOST_TEST)
+            debug_output_queue[even_frame * channels] = left_even;
+            debug_output_queue[even_frame * channels + 1U] = right_even;
+            debug_output_queue[odd_frame * channels] = left_odd;
+            debug_output_queue[odd_frame * channels + 1U] = right_odd;
+#endif
+        }
+    }
+
+    if (half == 1U) {
+        // Carry the newest u samples into the half-band history.
+        for (std::size_t channel = 0U; channel < channels; ++channel) {
+            auto* const buffer = stage2_buffer.data() + channel * stage2_stride;
+            std::memcpy(buffer, buffer + stage1_block_frames,
+                        halfband_history_frames * sizeof(float));
+        }
+        if (store) {
+            output_write_ = (output_write_ + block_output_frames) % output_queue_frames;
+            output_available_ += block_output_frames;
+        }
+    }
+}
+
+void PolyphaseUpsampler::process_one_slice() noexcept {
+    if (active_slice_ >= slices_per_block) return;
+    if (active_slice_ < stage1_phase_count) stage1_slice(active_slice_);
+    else stage2_slice(active_slice_ - stage1_phase_count);
+    ++active_slice_;
 }
 
 void PolyphaseUpsampler::write_output(std::uint8_t* output,
@@ -316,12 +472,13 @@ std::size_t PolyphaseUpsampler::process(const std::uint8_t* input,
         return produced;
     }
 
-    const bool had_active_phase = active_phase_ < phase_count;
+    const bool had_active_slice = active_slice_ < slices_per_block;
     append_input(input, input_frames);
-    // Exactly one phase slice (16 KiB of contiguous H spectra) is evaluated
-    // per normal 1 ms refill. Four slices finish before the next 256-frame
-    // source block, bounding both CPU and FlexSPI demand.
-    if (had_active_phase) process_one_phase();
+    // Exactly one slice is evaluated per normal 1 ms refill: stage-1 phase 0,
+    // stage-1 phase 1, then stage 2 for each half of the block. Four slices
+    // finish before the next 256-frame source block, bounding both CPU and
+    // FlexSPI demand.
+    if (had_active_slice) process_one_slice();
     write_output(output, output_frames);
     position_numerator_ += static_cast<std::uint64_t>(output_frames) * input_rate_hz_;
     return output_frames;
@@ -335,6 +492,11 @@ std::size_t PolyphaseUpsampler::copy_last_float_output(
         last_float_frames_ : capacity_frames;
     std::memcpy(output, last_float_output.data(), count * channels * sizeof(float));
     return count;
+}
+
+void PolyphaseUpsampler::copy_last_stage1_block(float* output) const noexcept {
+    if (output == nullptr) return;
+    std::memcpy(output, debug_stage1_block.data(), debug_stage1_block.size() * sizeof(float));
 }
 #endif
 } // namespace audio

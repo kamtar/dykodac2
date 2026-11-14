@@ -24,8 +24,9 @@ Linux should expose an ALSA UAC2 playback PCM. All hosts should offer only
 44.1/48 kHz, stereo, 24-bit audio carried in four-byte subslots.
 
 Mute and volume requests are validated in the USB callback and queued for the
-cooperative loop. The loop applies one half-dB attenuation value to both DAC
-channels. Callbacks never touch relay, oscillator, or DAC GPIO/SPI.
+cooperative loop. The loop applies volume as an MCU gain with TPDF dither;
+the DAC attenuation registers hold a fixed protective ceiling and are never
+written with the host volume (see filter-and-volume-design.md). Callbacks never touch relay, oscillator, or DAC GPIO/SPI.
 
 ## Runtime safety behavior
 

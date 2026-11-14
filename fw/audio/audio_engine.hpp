@@ -3,6 +3,7 @@
 #include "audio/audio_format.hpp"
 #include "audio/polyphase_upsampler.hpp"
 #include "audio/stream_buffer.hpp"
+#include "audio/volume.hpp"
 
 namespace audio {
 struct DmaDiagnosticSnapshot {
@@ -38,6 +39,19 @@ struct RefillTimingSnapshot {
 class AudioEngine {
 public:
     static constexpr std::uint8_t dma_buffer_count = 4U;
+    // Power-on host volume; matches usb::UsbDevice's initial control state.
+    // main() also applies the USB control value explicitly before streaming.
+    static constexpr std::int16_t default_volume_db_8_8 = 0;
+    AudioEngine() noexcept { set_volume_db(default_volume_db_8_8); }
+    // Host volume in UAC2 1/256 dB units, clamped to [-127 dB, 0 dB] and
+    // applied as an MCU gain with fixed headroom (see config/board_config.hpp).
+    // Must be called from main context: process() runs only from service()
+    // and start(), which are main-context too, so no hand-off is needed.
+    void set_volume_db(std::int16_t db_8_8) noexcept {
+        volume_db_8_8_ = clamp_volume_db_8_8(db_8_8);
+        upsampler_.set_gain_target(mcu_gain_from_uac2_db(volume_db_8_8_));
+    }
+    std::int16_t volume_db() const noexcept { return volume_db_8_8_; }
     bool start_silence(const FormatConfig& config) noexcept;
     bool start(const FormatConfig& config, StreamBuffer& stream) noexcept;
     void service() noexcept;
@@ -69,6 +83,7 @@ private:
     std::size_t transfer_bytes_{0U};
     std::size_t transfer_frames_{0U};
     PolyphaseUpsampler upsampler_{};
+    std::int16_t volume_db_8_8_{default_volume_db_8_8};
     bool concealment_active_{false};
     DmaDiagnosticSnapshot dma_diagnostics_{};
     RefillTimingSnapshot refill_timing_{};
