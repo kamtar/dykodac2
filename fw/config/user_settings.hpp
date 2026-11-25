@@ -34,6 +34,9 @@ enum class Crossfeed : std::uint8_t {
     JanMeier = 3U,    // 650 Hz, 9.5 dB
 };
 inline constexpr std::uint8_t crossfeed_count = 4U;
+// Automatic loudness leveler: off or its speed (attack / release).
+enum class Leveler : std::uint8_t { Off = 0U, Slow = 1U, Medium = 2U, Fast = 3U };
+inline constexpr std::uint8_t leveler_mode_count = 4U;
 inline constexpr std::uint8_t channel_left = 0x01U;
 inline constexpr std::uint8_t channel_right = 0x02U;
 inline constexpr std::uint8_t channel_both = 0x03U;
@@ -65,13 +68,27 @@ struct Settings {
     std::int16_t balance_db_8_8{0};
     std::uint8_t invert_polarity{0U}; // channel_left / channel_right bits
     std::uint8_t reserved0{0U};
-    std::array<std::uint8_t, 12> reserved1{};
+    // Loudness leveler (cut-only AGC on BS.1770 K-weighted loudness of the
+    // input). Its other fields are only checked while it is on.
+    std::uint8_t leveler_mode{static_cast<std::uint8_t>(Leveler::Off)};
+    std::uint8_t leveler_max_cut_db{12U};
+    std::int16_t leveler_target_db_8_8{-18 * 256}; // LUFS (dB re full scale)
+    // Loudness compensation (ISO 226 bass/treble shelves that follow host
+    // volume below the reference volume).
+    std::uint8_t loudness_enabled{0U};
+    std::uint8_t loudness_amount_pct{70U};
+    std::int16_t loudness_reference_db_8_8{-10 * 256}; // host volume, flat there and above
+    std::uint8_t loudness_max_boost_db{12U};
+    std::array<std::uint8_t, 3> reserved1{};
     std::array<EqBand, eq_band_count> bands{};
 };
 static_assert(sizeof(Settings) == 192U, "settings wire layout changed");
 static_assert(offsetof(Settings, upsampler_mode) == 8U);
 static_assert(offsetof(Settings, headroom_db_8_8) == 12U);
 static_assert(offsetof(Settings, balance_db_8_8) == 16U);
+static_assert(offsetof(Settings, leveler_mode) == 20U);
+static_assert(offsetof(Settings, leveler_target_db_8_8) == 22U);
+static_assert(offsetof(Settings, loudness_reference_db_8_8) == 26U);
 static_assert(offsetof(Settings, bands) == 32U);
 
 // Accepted ranges. Values outside are rejected by validate() rather than
@@ -84,6 +101,15 @@ inline constexpr float maximum_frequency_hz = 20'000.0F;
 inline constexpr float maximum_band_gain_db = 20.0F;
 inline constexpr float minimum_q = 0.1F;
 inline constexpr float maximum_q = 20.0F;
+inline constexpr std::int16_t minimum_leveler_target_db_8_8 = -36 * 256;
+inline constexpr std::int16_t maximum_leveler_target_db_8_8 = -6 * 256;
+inline constexpr std::uint8_t minimum_leveler_cut_db = 1U;
+inline constexpr std::uint8_t maximum_leveler_cut_db = 30U;
+inline constexpr std::uint8_t minimum_loudness_amount_pct = 10U;
+inline constexpr std::uint8_t maximum_loudness_amount_pct = 100U;
+inline constexpr std::int16_t minimum_loudness_reference_db_8_8 = -60 * 256;
+inline constexpr std::uint8_t minimum_loudness_boost_db = 1U;
+inline constexpr std::uint8_t maximum_loudness_boost_db = 20U;
 
 inline Settings defaults() noexcept {
     Settings s{};
@@ -94,6 +120,7 @@ inline Settings defaults() noexcept {
 enum class Invalid : std::uint8_t {
     None = 0U, Header, UpsamplerMode, DacFilter, Crossfeed, Headroom, DacCeiling,
     Balance, Polarity, Reserved, BandType, BandChannels, BandFrequency, BandGain, BandQ,
+    Leveler, Loudness,
 };
 
 inline Invalid validate(const Settings& s) noexcept {
@@ -110,6 +137,22 @@ inline Invalid validate(const Settings& s) noexcept {
     if ((s.invert_polarity & ~channel_both) != 0U) return Invalid::Polarity;
     if (s.reserved0 != 0U) return Invalid::Reserved;
     for (const auto byte : s.reserved1) if (byte != 0U) return Invalid::Reserved;
+    // Records written before these features existed hold zeros here: off.
+    if (s.leveler_mode >= leveler_mode_count) return Invalid::Leveler;
+    if (s.leveler_mode != 0U &&
+        (s.leveler_target_db_8_8 < minimum_leveler_target_db_8_8 ||
+         s.leveler_target_db_8_8 > maximum_leveler_target_db_8_8 ||
+         s.leveler_max_cut_db < minimum_leveler_cut_db || s.leveler_max_cut_db > maximum_leveler_cut_db))
+        return Invalid::Leveler;
+    if (s.loudness_enabled > 1U) return Invalid::Loudness;
+    if (s.loudness_enabled != 0U &&
+        (s.loudness_amount_pct < minimum_loudness_amount_pct ||
+         s.loudness_amount_pct > maximum_loudness_amount_pct ||
+         s.loudness_reference_db_8_8 > 0 ||
+         s.loudness_reference_db_8_8 < minimum_loudness_reference_db_8_8 ||
+         s.loudness_max_boost_db < minimum_loudness_boost_db ||
+         s.loudness_max_boost_db > maximum_loudness_boost_db))
+        return Invalid::Loudness;
     for (const auto& band : s.bands) {
         if (band.type >= filter_type_count) return Invalid::BandType;
         if (band.reserved != 0U) return Invalid::Reserved;
@@ -123,6 +166,24 @@ inline Invalid validate(const Settings& s) noexcept {
         if (!(band.q >= minimum_q && band.q <= maximum_q)) return Invalid::BandQ;
     }
     return Invalid::None;
+}
+
+// Records saved before the leveler and loudness compensation existed hold
+// zeros in those fields (both off). Give them the default parameters, so the
+// running copy matches what a host writes back and switching on starts from
+// sensible values. Settings that are switched on are left alone.
+inline void upgrade(Settings& s) noexcept {
+    const Settings d{};
+    if (s.leveler_mode == 0U && s.leveler_max_cut_db == 0U && s.leveler_target_db_8_8 == 0) {
+        s.leveler_max_cut_db = d.leveler_max_cut_db;
+        s.leveler_target_db_8_8 = d.leveler_target_db_8_8;
+    }
+    if (s.loudness_enabled == 0U && s.loudness_amount_pct == 0U && s.loudness_reference_db_8_8 == 0 &&
+        s.loudness_max_boost_db == 0U) {
+        s.loudness_amount_pct = d.loudness_amount_pct;
+        s.loudness_reference_db_8_8 = d.loudness_reference_db_8_8;
+        s.loudness_max_boost_db = d.loudness_max_boost_db;
+    }
 }
 
 // CRC-32 (IEEE 802.3, reflected, init/xorout 0xFFFFFFFF) for the flash record.

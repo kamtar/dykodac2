@@ -49,8 +49,19 @@ public:
     // Must be called from main context: process() runs only from service()
     // and start(), which are main-context too, so no hand-off is needed.
     void set_volume_db(std::int16_t db_8_8) noexcept {
+        const std::int16_t previous = volume_db_8_8_;
         volume_db_8_8_ = clamp_volume_db_8_8(db_8_8);
         apply_gain();
+        if (settings_.loudness_enabled == 0U || volume_db_8_8_ == previous) return;
+        if (volume_db_8_8_ < previous && running_) {
+            // Turning down raises the loudness shelves. Let the lower output
+            // gain (behind the interpolator latency and its ramp) arrive
+            // first, so the extra bass never meets the old, higher gain.
+            loudness_delay_refills_ = loudness_delay_buffers;
+        } else {
+            loudness_delay_refills_ = 0U;
+            update_loudness();
+        }
     }
     std::int16_t volume_db() const noexcept { return volume_db_8_8_; }
     // User settings for the float chain (EQ, crossfeed, balance, polarity,
@@ -64,6 +75,10 @@ public:
     // source DSP chain (time-aligned with the EQ), and the headroom actually
     // in effect.
     float dsp_boost_db() const noexcept { return boost_db_; }
+    // Leveler gain in effect (dB <= 0) and loudness shelf gains (dB >= 0).
+    float leveler_gain_db() noexcept { return upsampler_.dsp().leveler_gain_db(); }
+    float loudness_bass_db() const noexcept { return design_.loudness_bass_db; }
+    float loudness_treble_db() const noexcept { return design_.loudness_treble_db; }
     float effective_headroom_db() const noexcept {
         return static_cast<float>(settings_.headroom_db_8_8) / 256.0F - boost_db_;
     }
@@ -96,11 +111,21 @@ private:
         // Before the first start there is no source rate yet; design for
         // 48 kHz so the reported boost is meaningful. start() redesigns.
         const std::uint32_t rate = upsampler_.input_rate_hz();
-        const SourceDspDesign design = design_source_dsp(settings_, rate != 0U ? rate : 48'000U);
-        upsampler_.dsp().set_design(design);
-        boost_db_ = design.boost_db;
+        design_ = design_source_dsp(settings_, rate != 0U ? rate : 48'000U);
+        boost_db_ = design_.boost_db;
+        loudness_delay_refills_ = 0U;
+        update_loudness();
         apply_gain();
     }
+    // Only the loudness slots follow the volume; the rest of the cached
+    // design (and its boost analysis) stays as it is.
+    void update_loudness() noexcept {
+        apply_loudness_compensation(design_, settings_, volume_db_8_8_);
+        upsampler_.dsp().set_design(design_);
+    }
+    // About 24 ms at 1 ms per DMA buffer: interpolator delay (6 ms) plus the
+    // output gain ramp, with margin.
+    static constexpr std::uint8_t loudness_delay_buffers = 24U;
     std::uint8_t* prepare_next_buffer() noexcept;
     std::uint8_t* timed_prepare_next_buffer() noexcept;
     bool take_refill_request() noexcept;
@@ -119,6 +144,8 @@ private:
     std::int16_t volume_db_8_8_{default_volume_db_8_8};
     settings::Settings settings_{settings::defaults()};
     float boost_db_{0.0F};
+    SourceDspDesign design_{};
+    std::uint8_t loudness_delay_refills_{0U};
     bool concealment_active_{false};
     DmaDiagnosticSnapshot dma_diagnostics_{};
     RefillTimingSnapshot refill_timing_{};

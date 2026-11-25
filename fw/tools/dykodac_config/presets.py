@@ -60,7 +60,8 @@ class Preset:
                    raw.get("description") or raw.get("preset_description") or "")
 
 
-PK, LS, HS, HP = p.FILTER_PEAKING, p.FILTER_LOW_SHELF, p.FILTER_HIGH_SHELF, p.FILTER_HIGH_PASS
+PK, LS, HS, HP, LP = (p.FILTER_PEAKING, p.FILTER_LOW_SHELF, p.FILTER_HIGH_SHELF, p.FILTER_HIGH_PASS,
+                      p.FILTER_LOW_PASS)
 B = p.CH_BOTH
 
 
@@ -90,6 +91,123 @@ BUILTIN: list[Preset] = [
         (HP, B, 20.0, 0.0, 0.7071)),
     _eq("Speakers: desk / nearfield", "Cuts the desk-bounce bump, lifts presence slightly, subsonic filter.",
         (PK, B, 160.0, -3.0, 1.4), (PK, B, 3000.0, 1.0, 1.0), (HP, B, 25.0, 0.0, 0.7071)),
+
+    # --- Headphone corrections -------------------------------------------------
+    # Measured corrections to the Harman over-ear target, taken from oratory1990's
+    # measurements as published in the AutoEq project (results/oratory1990/over-ear).
+    # The preamp from those files is not needed: the firmware removes the EQ's max
+    # boost from the headroom automatically.
+    _eq("HIFIMAN HE400se (stock)", "oratory1990 measurement -> Harman target (via AutoEq). Sub-bass shelf, "
+        "fills the 2 kHz dip, softens the top octave.",
+        (LS, B, 105.0, 6.7, 0.70), (PK, B, 1968.0, 5.1, 2.37), (PK, B, 861.0, -2.3, 1.86),
+        (PK, B, 101.0, -2.4, 0.32), (PK, B, 1619.0, 1.1, 3.53), (HS, B, 10000.0, -2.6, 0.70),
+        (PK, B, 138.0, 0.7, 1.98), (PK, B, 64.0, -0.7, 1.95), (PK, B, 251.0, -0.4, 2.33),
+        (PK, B, 29.0, 0.5, 2.63)),
+    _eq("HIFIMAN HE400se (Supergrills)", "Grille-less / Supergrills HE400se: the stock oratory1990 correction "
+        "adjusted by a measured stock-vs-Supergrills difference (same rig): fills the deeper 2.5-3.5 kHz "
+        "recess and the 1 kHz dip, a touch more mid-bass, less of the extra 20 Hz rumble.",
+        (LS, B, 105.0, 6.7, 0.7), (PK, B, 1968.0, 5.1, 2.37), (PK, B, 861.0, -2.3, 1.86),
+        (PK, B, 101.0, -2.4, 0.32), (PK, B, 1619.0, 1.1, 3.53), (HS, B, 10000.0, -2.6, 0.7),
+        (PK, B, 90.0, 1.6, 1.0), (PK, B, 20.0, -3.0, 1.6), (PK, B, 1100.0, 1.5, 2.0),
+        (PK, B, 3000.0, 3.2, 2.0)),
+    _eq("Beyerdynamic DT 990 Pro", "oratory1990 measurement -> Harman target (via AutoEq). Big sub-bass "
+        "lift, mid-bass and 6-8 kHz peaks tamed, strong top-octave cut.",
+        (LS, B, 105.0, 10.1, 0.70), (PK, B, 541.0, 3.1, 0.52), (PK, B, 64.0, -7.4, 0.38),
+        (PK, B, 7731.0, -4.6, 1.06), (PK, B, 640.0, 0.6, 2.47), (HS, B, 10000.0, -9.8, 0.70),
+        (PK, B, 7136.0, 3.1, 2.08), (PK, B, 5897.0, -4.8, 5.30), (PK, B, 4193.0, 1.1, 1.51),
+        (PK, B, 9436.0, 2.7, 3.53)),
+    _eq("Beyerdynamic DT 990 Pro (gentle)", "Light version for people who like the DT 990 sound: only "
+        "tames the 6-8 kHz treble peak and fills in a little sub-bass.",
+        (LS, B, 105.0, 4.0, 0.70), (PK, B, 5900.0, -3.0, 4.0), (PK, B, 7700.0, -4.0, 1.4),
+        (HS, B, 10000.0, -3.0, 0.70)),
+
+    # --- ASMR ----------------------------------------------------------------
+    # Meant for neutral (or already well-behaved) headphones; they replace the
+    # headphone correction rather than stacking on top of it.
+    _eq("ASMR: soft & sleepy", "Warmer and gentler: takes the edge off sharp mouth sounds, sibilance and "
+        "crinkles. For relaxing or falling asleep at low volume.",
+        (LS, B, 150.0, 2.0, 0.7), (PK, B, 6500.0, -3.5, 2.0), (HS, B, 10000.0, -4.0, 0.7)),
+    _eq("ASMR: tingles / detail", "Brings out texture in tapping, brushing and whispers; cleans up "
+        "mic-handling rumble. Can get intense on bright recordings.",
+        (HP, B, 35.0, 0.0, 0.7071), (PK, B, 250.0, -1.5, 1.0), (PK, B, 4000.0, 2.0, 1.0),
+        (HS, B, 8000.0, 3.0, 0.7)),
+    _eq("ASMR: whisper clarity", "Removes the boomy proximity effect of close-mic'd whispering and makes the "
+        "words easier to follow, with a mild de-ess.",
+        (HP, B, 60.0, 0.0, 0.7071), (PK, B, 200.0, -3.0, 1.0), (PK, B, 3000.0, 2.5, 1.2),
+        (PK, B, 7000.0, -2.5, 3.0)),
+    _eq("ASMR: hiss reduction", "For noisy recordings (cheap mics, high gain): rolls off the hiss above "
+        "~8 kHz. Dulls the sound, so use only when the noise bothers you.",
+        (HS, B, 8000.0, -5.0, 0.7), (LP, B, 15000.0, 0.0, 0.7071)),
+    _eq("ASMR: natural breathing", "Brings breaths and sighs forward (warm body ~650 Hz, presence ~1.6 kHz) "
+        "without boosting plosive 'p' pops (cut below ~150 Hz), lip smacks/mouth clicks (dip at 3.5 kHz) "
+        "or gushing air (shelf down above 9 kHz).",
+        (HP, B, 80.0, 0.0, 0.7071), (PK, B, 120.0, -2.0, 0.9), (PK, B, 650.0, 2.0, 0.8),
+        (PK, B, 1600.0, 1.5, 1.2), (PK, B, 3500.0, -2.0, 1.8), (HS, B, 9000.0, -2.0, 0.7)),
+
+    # --- Headphone correction + ASMR ---------------------------------------------
+    # The headphone correction above with an ASMR flavour folded in, squeezed into
+    # the 10 bands: shelves are summed, the least important correction peaks are
+    # dropped. Each stays within ~1.2 dB of running both EQs in full (20 Hz-20 kHz).
+    _eq("HE400se + ASMR soft & sleepy", "HE400se (stock) correction plus 'ASMR: soft & sleepy'.",
+        (LS, B, 105.0, 8.7, 0.70), (PK, B, 1968.0, 5.1, 2.37), (PK, B, 861.0, -2.3, 1.86),
+        (PK, B, 101.0, -2.4, 0.32), (PK, B, 1619.0, 1.1, 3.53), (HS, B, 10000.0, -6.6, 0.70),
+        (PK, B, 138.0, 0.7, 1.98), (PK, B, 251.0, -0.4, 2.33), (PK, B, 29.0, 0.5, 2.63),
+        (PK, B, 6500.0, -3.5, 2.0)),
+    _eq("HE400se Supergrills + ASMR soft & sleepy", "HE400se (Supergrills) correction plus 'ASMR: soft & sleepy'.",
+        (LS, B, 105.0, 8.7, 0.7), (PK, B, 1968.0, 5.1, 2.37), (PK, B, 861.0, -2.3, 1.86),
+        (PK, B, 101.0, -2.4, 0.32), (HS, B, 10000.0, -6.6, 0.7), (PK, B, 90.0, 1.6, 1.0),
+        (PK, B, 20.0, -3.0, 1.6), (PK, B, 1100.0, 1.5, 2.0), (PK, B, 3000.0, 3.2, 2.0),
+        (PK, B, 6500.0, -3.5, 2.0)),
+    _eq("HE400se + ASMR tingles", "HE400se (stock) correction plus 'ASMR: tingles / detail'.",
+        (LS, B, 105.0, 6.7, 0.70), (PK, B, 1968.0, 5.1, 2.37), (PK, B, 861.0, -2.3, 1.86),
+        (PK, B, 101.0, -2.4, 0.32), (PK, B, 1619.0, 1.1, 3.53), (HS, B, 10000.0, 0.4, 0.70),
+        (PK, B, 138.0, 0.7, 1.98), (HP, B, 35.0, 0.0, 0.7071), (PK, B, 250.0, -1.5, 1.0),
+        (PK, B, 4000.0, 2.0, 1.0)),
+    _eq("HE400se Supergrills + ASMR tingles", "HE400se (Supergrills) correction plus 'ASMR: tingles / detail'.",
+        (LS, B, 105.0, 6.7, 0.7), (PK, B, 1968.0, 5.1, 2.37), (PK, B, 861.0, -2.3, 1.86),
+        (PK, B, 101.0, -2.4, 0.32), (HS, B, 10000.0, 0.4, 0.7), (PK, B, 20.0, -3.0, 1.6),
+        (PK, B, 1100.0, 1.5, 2.0), (PK, B, 3000.0, 3.2, 2.0), (HP, B, 35.0, 0.0, 0.7071),
+        (PK, B, 4000.0, 2.0, 1.0)),
+    _eq("HE400se + ASMR whisper clarity", "HE400se (stock) correction plus 'ASMR: whisper clarity'.",
+        (LS, B, 105.0, 6.7, 0.70), (PK, B, 1968.0, 5.1, 2.37), (PK, B, 861.0, -2.3, 1.86),
+        (PK, B, 101.0, -2.4, 0.32), (PK, B, 1619.0, 1.1, 3.53), (HS, B, 10000.0, -2.6, 0.70),
+        (HP, B, 60.0, 0.0, 0.7071), (PK, B, 200.0, -3.0, 1.0), (PK, B, 3000.0, 2.5, 1.2),
+        (PK, B, 7000.0, -2.5, 3.0)),
+    _eq("HE400se Supergrills + ASMR whisper clarity", "HE400se (Supergrills) correction plus 'ASMR: whisper clarity'.",
+        (LS, B, 105.0, 6.7, 0.7), (PK, B, 1968.0, 5.1, 2.37), (PK, B, 861.0, -2.3, 1.86),
+        (HS, B, 10000.0, -2.6, 0.7), (PK, B, 20.0, -3.0, 1.6), (PK, B, 3000.0, 3.2, 2.0),
+        (HP, B, 60.0, 0.0, 0.7071), (PK, B, 200.0, -3.0, 1.0), (PK, B, 3000.0, 2.5, 1.2),
+        (PK, B, 7000.0, -2.5, 3.0)),
+    _eq("DT 990 Pro + ASMR soft & sleepy", "DT 990 Pro correction plus 'ASMR: soft & sleepy'.",
+        (LS, B, 105.0, 12.1, 0.70), (PK, B, 541.0, 3.1, 0.52), (PK, B, 64.0, -7.4, 0.38),
+        (PK, B, 7731.0, -4.6, 1.06), (HS, B, 10000.0, -13.8, 0.70), (PK, B, 7136.0, 3.1, 2.08),
+        (PK, B, 5897.0, -4.8, 5.30), (PK, B, 4193.0, 1.1, 1.51), (PK, B, 9436.0, 2.7, 3.53),
+        (PK, B, 6500.0, -3.5, 2.0)),
+    _eq("DT 990 Pro + ASMR tingles", "DT 990 Pro correction plus 'ASMR: tingles / detail'.",
+        (LS, B, 105.0, 10.1, 0.70), (PK, B, 541.0, 3.1, 0.52), (PK, B, 64.0, -7.4, 0.38),
+        (PK, B, 640.0, 0.6, 2.47), (HS, B, 10000.0, -6.8, 0.70), (PK, B, 5897.0, -4.8, 5.30),
+        (PK, B, 4193.0, 1.1, 1.51), (HP, B, 35.0, 0.0, 0.7071), (PK, B, 250.0, -1.5, 1.0),
+        (PK, B, 4000.0, 2.0, 1.0)),
+    _eq("DT 990 Pro + ASMR whisper clarity", "DT 990 Pro correction plus 'ASMR: whisper clarity'.",
+        (LS, B, 105.0, 10.1, 0.70), (PK, B, 541.0, 3.1, 0.52), (PK, B, 64.0, -7.4, 0.38),
+        (PK, B, 640.0, 0.6, 2.47), (HS, B, 10000.0, -9.8, 0.70), (PK, B, 5897.0, -4.8, 5.30),
+        (HP, B, 60.0, 0.0, 0.7071), (PK, B, 200.0, -3.0, 1.0), (PK, B, 3000.0, 2.5, 1.2),
+        (PK, B, 7000.0, -2.5, 3.0)),
+    _eq("HE400se + ASMR natural breathing", "HE400se (stock) correction plus 'ASMR: natural breathing'.",
+        (LS, B, 105.0, 6.7, 0.70), (PK, B, 1968.0, 5.1, 2.37), (PK, B, 861.0, -2.3, 1.86),
+        (PK, B, 101.0, -2.4, 0.32), (HS, B, 10000.0, -4.6, 0.70), (HP, B, 80.0, 0.0, 0.7071),
+        (PK, B, 120.0, -2.0, 0.9), (PK, B, 650.0, 2.0, 0.8), (PK, B, 1600.0, 1.5, 1.2),
+        (PK, B, 3500.0, -2.0, 1.8)),
+    _eq("HE400se Supergrills + ASMR natural breathing", "HE400se (Supergrills) correction plus 'ASMR: natural breathing'.",
+        (LS, B, 105.0, 6.7, 0.7), (PK, B, 1968.0, 5.1, 2.37), (PK, B, 101.0, -2.4, 0.32),
+        (HS, B, 10000.0, -4.6, 0.7), (PK, B, 20.0, -3.0, 1.6), (PK, B, 1100.0, 1.5, 2.0),
+        (PK, B, 3000.0, 3.2, 2.0), (HP, B, 80.0, 0.0, 0.7071), (PK, B, 1600.0, 1.5, 1.2),
+        (PK, B, 3500.0, -2.0, 1.8)),
+    _eq("DT 990 Pro + ASMR natural breathing", "DT 990 Pro correction plus 'ASMR: natural breathing'.",
+        (LS, B, 105.0, 10.1, 0.70), (PK, B, 541.0, 3.1, 0.52), (PK, B, 64.0, -7.4, 0.38),
+        (HS, B, 10000.0, -11.8, 0.70), (PK, B, 5897.0, -4.8, 5.30), (HP, B, 80.0, 0.0, 0.7071),
+        (PK, B, 120.0, -2.0, 0.9), (PK, B, 650.0, 2.0, 0.8), (PK, B, 1600.0, 1.5, 1.2),
+        (PK, B, 3500.0, -2.0, 1.8)),
 ]
 
 

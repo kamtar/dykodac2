@@ -80,7 +80,9 @@ struct Info {
     std::uint8_t upsampler_bypass_active{0U};
     std::uint8_t last_flash_status{0U};
     std::uint8_t reserved{0U};
-    std::uint32_t reserved1{0U};
+    float leveler_gain_db{0.0F};     // <= 0, applied now
+    float loudness_bass_db{0.0F};    // >= 0, loudness compensation now
+    float loudness_treble_db{0.0F};
 };
 static_assert(sizeof(Info) <= chunk_bytes, "info must fit one response");
 

@@ -31,6 +31,7 @@ void ConfigService::boot(ConfigBackend& backend) noexcept {
     settings::Settings loaded{};
     std::uint32_t sequence = 0U;
     last_flash_ = backend.flash_load(loaded, sequence);
+    settings::upgrade(loaded);
     if (last_flash_ == FlashResult::Ok && settings::validate(loaded) == settings::Invalid::None) {
         flash_valid_ = true;
         flash_sequence_ = sequence;
@@ -119,6 +120,7 @@ usb::config::Response ConfigService::handle(const std::uint8_t* packet, std::siz
         settings::Settings loaded{};
         std::uint32_t sequence = 0U;
         last_flash_ = backend.flash_load(loaded, sequence);
+        settings::upgrade(loaded);
         if (last_flash_ == FlashResult::Ok && settings::validate(loaded) != settings::Invalid::None)
             last_flash_ = FlashResult::NoRecord;
         status = flash_status(last_flash_);

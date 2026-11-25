@@ -213,6 +213,7 @@ bool AudioEngine::take_refill_request() noexcept {
 void AudioEngine::service() noexcept {
     while (running_ && take_refill_request()) {
         (void)timed_prepare_next_buffer();
+        if (loudness_delay_refills_ != 0U && --loudness_delay_refills_ == 0U) update_loudness();
     }
 }
 
@@ -233,6 +234,10 @@ void AudioEngine::conceal_underrun(std::uint8_t* buffer, std::size_t received_by
 void AudioEngine::stop() noexcept {
     if (!running_) return;
     running_ = false;
+    if (loudness_delay_refills_ != 0U) {
+        loudness_delay_refills_ = 0U;
+        update_loudness();
+    }
     refill_requests_ = 0U;
     SAI_TransferAbortSendEDMA(SAI1, &sai_handle);
     SAI_Deinit(SAI1);

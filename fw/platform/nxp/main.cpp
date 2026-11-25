@@ -329,6 +329,9 @@ public:
         info.host_volume_db_8_8 = r_.engine.volume_db();
         info.dsp_boost_db = r_.engine.dsp_boost_db();
         info.effective_headroom_db = r_.engine.effective_headroom_db();
+        info.leveler_gain_db = r_.engine.leveler_gain_db();
+        info.loudness_bass_db = r_.engine.loudness_bass_db();
+        info.loudness_treble_db = r_.engine.loudness_treble_db();
         info.app_state = static_cast<std::uint8_t>(r_.app.state());
         info.upsampler_bypass_active = r_.active && r_.active->dac_mode == 1U ? 1U : 0U;
         if (r_.stream_requested) info.flags |= usb::config::flag_streaming;

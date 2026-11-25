@@ -44,6 +44,63 @@ float first_order_magnitude(float n0, float n1, float d1, float cos_w) noexcept 
     return std::sqrt(num / den);
 }
 
+// BS.1770-4 K-weighting for any sample rate (the two analog prototypes,
+// bilinear transformed with prewarping), as libebur128 derives them.
+void design_k_weighting(std::uint32_t rate, Biquad& shelf, Biquad& highpass) noexcept {
+    {
+        const double f0 = 1681.974450955533, g = 3.999843853973347, q = 0.7071752369554196;
+        const double k = std::tan(pi * f0 / rate);
+        const double vh = std::pow(10.0, g / 20.0);
+        const double vb = std::pow(vh, 0.4996667741545416);
+        const double a0 = 1.0 + k / q + k * k;
+        shelf = {static_cast<float>((vh + vb * k / q + k * k) / a0), static_cast<float>(2.0 * (k * k - vh) / a0),
+                 static_cast<float>((vh - vb * k / q + k * k) / a0), static_cast<float>(2.0 * (k * k - 1.0) / a0),
+                 static_cast<float>((1.0 - k / q + k * k) / a0)};
+    }
+    {
+        const double f0 = 38.13547087602444, q = 0.5003270373238773;
+        const double k = std::tan(pi * f0 / rate);
+        const double a0 = 1.0 + k / q + k * k;
+        highpass = {1.0F, -2.0F, 1.0F, static_cast<float>(2.0 * (k * k - 1.0) / a0),
+                    static_cast<float>((1.0 - k / q + k * k) / a0)};
+    }
+}
+
+struct LevelerSpeed { double attack_s; double release_s; };
+constexpr LevelerSpeed leveler_speeds[settings::leveler_mode_count] = {
+    {1.5, 10.0}, {4.0, 30.0}, {1.5, 10.0}, {0.5, 3.0},
+};
+constexpr double leveler_block_seconds = 0.1;
+// Blocks quieter than this (silence, fade tails, track gaps) hold the gain.
+constexpr double leveler_gate_lufs = -50.0;
+
+double lufs_to_power(double lufs) noexcept { return std::pow(10.0, (lufs + 0.691) / 10.0); }
+
+LevelerDesign design_leveler(const settings::Settings& s, std::uint32_t rate) noexcept {
+    LevelerDesign l{};
+    const std::uint8_t mode = s.leveler_mode < settings::leveler_mode_count ? s.leveler_mode : 0U;
+    l.enabled = mode != 0U;
+    design_k_weighting(rate, l.k_shelf, l.k_highpass);
+    l.block_frames = static_cast<std::uint32_t>(rate * leveler_block_seconds + 0.5);
+    const double full_scale = 8'388'608.0; // the chain runs in 24-bit integer scale
+    l.power_scale = static_cast<float>(1.0 / (static_cast<double>(l.block_frames) * full_scale * full_scale));
+    l.attack = static_cast<float>(1.0 - std::exp(-leveler_block_seconds / leveler_speeds[mode].attack_s));
+    l.release = static_cast<float>(1.0 - std::exp(-leveler_block_seconds / leveler_speeds[mode].release_s));
+    // The gain glides with the block length as time constant, so the
+    // 100 ms target steps become a smooth curve.
+    l.smooth = static_cast<float>(1.0 - std::exp(-1.0 / (leveler_block_seconds * rate)));
+    const double target = l.enabled ? s.leveler_target_db_8_8 / 256.0 : -18.0;
+    l.target_power = static_cast<float>(lufs_to_power(target));
+    l.gate_power = static_cast<float>(lufs_to_power(leveler_gate_lufs));
+    l.min_gain = l.enabled ? static_cast<float>(std::pow(10.0, -s.leveler_max_cut_db / 20.0)) : 1.0F;
+    return l;
+}
+
+void refresh_identity(SourceDspDesign& d) noexcept {
+    d.identity = d.left_mask == 0U && d.right_mask == 0U && !d.crossfeed.enabled &&
+                 d.trim_left == 1.0F && d.trim_right == 1.0F && d.makeup == 1.0F && !d.leveler.enabled;
+}
+
 float chain_magnitude(const SourceDspDesign& d, bool left, float w) noexcept {
     float m = 1.0F;
     const auto& bands = left ? d.left : d.right;
@@ -201,9 +258,15 @@ SourceDspDesign design_source_dsp(const settings::Settings& s, std::uint32_t sam
     d.trim_right = balance_db < 0.0F ? std::pow(10.0F, balance_db / 20.0F) : 1.0F;
     if ((s.invert_polarity & settings::channel_left) != 0U) d.trim_left = -d.trim_left;
     if ((s.invert_polarity & settings::channel_right) != 0U) d.trim_right = -d.trim_right;
-    d.identity = d.left_mask == 0U && d.right_mask == 0U && !d.crossfeed.enabled &&
-                 d.trim_left == 1.0F && d.trim_right == 1.0F;
-    if (d.identity) return d;
+    d.leveler = design_leveler(s, sample_rate_hz);
+    // The boost analysis covers the user chain only (EQ, crossfeed, trims);
+    // the leveler only cuts and the loudness slots are bounded by the host
+    // attenuation (see apply_loudness_compensation()).
+    if (d.left_mask == 0U && d.right_mask == 0U && !d.crossfeed.enabled &&
+        d.trim_left == 1.0F && d.trim_right == 1.0F) {
+        refresh_identity(d);
+        return d;
+    }
 
     float peak = 0.0F;
     const float top = 0.499F * static_cast<float>(sample_rate_hz);
@@ -222,8 +285,60 @@ SourceDspDesign design_source_dsp(const settings::Settings& s, std::uint32_t sam
     }
     // A 0.1 dB margin covers peaks between grid points.
     d.boost_db = peak > 1.0F ? 20.0F * std::log10(peak) + 0.1F : 0.0F;
-    d.makeup = std::pow(10.0F, -d.boost_db / 20.0F);
+    d.makeup = d.boost_db > 0.0F ? std::pow(10.0F, -d.boost_db / 20.0F) : 1.0F;
+    refresh_identity(d);
     return d;
+}
+
+void loudness_shelf_gains(const settings::Settings& s, std::int16_t host_volume_db_8_8,
+                          float& bass_db, float& treble_db) noexcept {
+    bass_db = 0.0F;
+    treble_db = 0.0F;
+    if (s.loudness_enabled == 0U) return;
+    const float attenuation =
+        static_cast<float>(static_cast<std::int32_t>(s.loudness_reference_db_8_8) - host_volume_db_8_8) / 256.0F;
+    if (!(attenuation > 0.0F)) return;
+    const float amount = static_cast<float>(s.loudness_amount_pct) / 100.0F;
+    bass_db = loudness_bass_per_db * amount * attenuation;
+    treble_db = loudness_treble_per_db * amount * attenuation;
+    const float cap = static_cast<float>(s.loudness_max_boost_db);
+    if (bass_db > cap) {
+        // Keep the curve's shape: both shelves stop growing together.
+        treble_db *= cap / bass_db;
+        bass_db = cap;
+    }
+}
+
+void apply_loudness_compensation(SourceDspDesign& d, const settings::Settings& s,
+                                 std::int16_t host_volume_db_8_8) noexcept {
+    float bass = 0.0F;
+    float treble = 0.0F;
+    loudness_shelf_gains(s, host_volume_db_8_8, bass, treble);
+    constexpr auto bass_bit = static_cast<std::uint16_t>(1U << loudness_bass_slot);
+    constexpr auto treble_bit = static_cast<std::uint16_t>(1U << loudness_treble_slot);
+    d.left_mask = static_cast<std::uint16_t>(d.left_mask & ~(bass_bit | treble_bit));
+    d.right_mask = static_cast<std::uint16_t>(d.right_mask & ~(bass_bit | treble_bit));
+    d.left_svf[loudness_bass_slot] = d.right_svf[loudness_bass_slot] = {};
+    d.left_svf[loudness_treble_slot] = d.right_svf[loudness_treble_slot] = {};
+    // Below 0.01 dB the slot is left out (and the chain can go idle).
+    d.loudness_bass_db = bass >= 0.01F ? bass : 0.0F;
+    d.loudness_treble_db = treble >= 0.01F ? treble : 0.0F;
+    if (d.sample_rate_hz != 0U && d.loudness_bass_db > 0.0F) {
+        const settings::EqBand band{static_cast<std::uint8_t>(settings::FilterType::LowShelf), settings::channel_both,
+                                    0U, loudness_bass_hz, d.loudness_bass_db, loudness_bass_q};
+        d.left_svf[loudness_bass_slot] = d.right_svf[loudness_bass_slot] = design_band_svf(band, d.sample_rate_hz);
+        d.left_mask |= bass_bit;
+        d.right_mask |= bass_bit;
+    }
+    if (d.sample_rate_hz != 0U && d.loudness_treble_db > 0.0F) {
+        const settings::EqBand band{static_cast<std::uint8_t>(settings::FilterType::HighShelf), settings::channel_both,
+                                    0U, loudness_treble_hz, d.loudness_treble_db, loudness_treble_q};
+        d.left_svf[loudness_treble_slot] = d.right_svf[loudness_treble_slot] =
+            design_band_svf(band, d.sample_rate_hz);
+        d.left_mask |= treble_bit;
+        d.right_mask |= treble_bit;
+    }
+    refresh_identity(d);
 }
 
 void SourceDsp::update_coefficients(Band& b) noexcept {
@@ -235,7 +350,7 @@ void SourceDsp::update_coefficients(Band& b) noexcept {
 }
 
 void SourceDsp::snap() noexcept {
-    for (std::size_t i = 0U; i < settings::eq_band_count; ++i) {
+    for (std::size_t i = 0U; i < dsp_band_count; ++i) {
         left_[i] = {};
         right_[i] = {};
         const auto bit = static_cast<std::uint16_t>(1U << i);
@@ -255,7 +370,8 @@ void SourceDsp::snap() noexcept {
     xf_wet_ = xf_wet_from_ = xf_wet_to_ = xf_.enabled ? 1.0F : 0.0F;
     lo_left_ = lo_right_ = hi_left_ = hi_right_ = in_left_ = in_right_ = 0.0F;
     ramp_steps_total_ = ramp_steps_left_ = ramp_phase_ = 0U;
-    idle_ = design_.identity;
+    adopt_leveler(design_.leveler, true);
+    update_idle();
 }
 
 void SourceDsp::set_design(const SourceDspDesign& design) noexcept {
@@ -279,7 +395,7 @@ void SourceDsp::set_design(const SourceDspDesign& design) noexcept {
         // A band that goes away fades to unity with its current tuning.
         b.to = target ? p : SvfParams{b.p.g, b.p.k, 1.0F, 0.0F, 0.0F};
     };
-    for (std::size_t i = 0U; i < settings::eq_band_count; ++i) {
+    for (std::size_t i = 0U; i < dsp_band_count; ++i) {
         const auto bit = static_cast<std::uint16_t>(1U << i);
         retarget(left_[i], (live_left_mask_ & bit) != 0U, (design.left_mask & bit) != 0U, design.left_svf[i]);
         retarget(right_[i], (live_right_mask_ & bit) != 0U, (design.right_mask & bit) != 0U, design.right_svf[i]);
@@ -305,6 +421,7 @@ void SourceDsp::set_design(const SourceDspDesign& design) noexcept {
     }
     xf_wet_from_ = xf_wet_;
     xf_wet_to_ = design.crossfeed.enabled ? 1.0F : 0.0F;
+    adopt_leveler(design.leveler, false);
 
     const float steps = ramp_seconds * static_cast<float>(design.sample_rate_hz) /
                         static_cast<float>(ramp_block_frames);
@@ -327,7 +444,7 @@ void SourceDsp::advance_ramp() noexcept {
         b.p.m2 = lerp(b.from.m2, b.to.m2);
         update_coefficients(b);
     };
-    for (std::size_t i = 0U; i < settings::eq_band_count; ++i) {
+    for (std::size_t i = 0U; i < dsp_band_count; ++i) {
         const auto bit = static_cast<std::uint16_t>(1U << i);
         if ((live_left_mask_ & bit) != 0U) glide(left_[i]);
         if ((live_right_mask_ & bit) != 0U) glide(right_[i]);
@@ -338,7 +455,7 @@ void SourceDsp::advance_ramp() noexcept {
     if (ramp_steps_left_ != 0U) return;
 
     // Glide finished: land exactly on the design and drop faded-out parts.
-    for (std::size_t i = 0U; i < settings::eq_band_count; ++i) {
+    for (std::size_t i = 0U; i < dsp_band_count; ++i) {
         const auto bit = static_cast<std::uint16_t>(1U << i);
         if ((design_.left_mask & bit) == 0U) left_[i] = {};
         if ((design_.right_mask & bit) == 0U) right_[i] = {};
@@ -353,7 +470,49 @@ void SourceDsp::advance_ramp() noexcept {
         lo_left_ = lo_right_ = hi_left_ = hi_right_ = in_left_ = in_right_ = 0.0F;
     }
     xf_wet_ = xf_wet_to_;
-    idle_ = design_.identity;
+    update_idle();
+}
+
+void SourceDsp::update_idle() noexcept {
+    idle_ = design_.identity && !lev_.enabled && lev_gain_ == 1.0F && lev_target_ == 1.0F &&
+            ramp_steps_left_ == 0U;
+}
+
+void SourceDsp::adopt_leveler(const LevelerDesign& design, bool restart_meter) noexcept {
+    const bool was_enabled = lev_.enabled;
+    const bool rate_changed = design.block_frames != lev_.block_frames;
+    lev_ = design;
+    if (!lev_.enabled) {
+        lev_target_ = 1.0F;
+        // A restart begins from silence: no need to glide back.
+        if (restart_meter) lev_gain_ = 1.0F;
+        return;
+    }
+    if (restart_meter || rate_changed || !was_enabled) {
+        for (auto& state : k_state_) state = 0.0F;
+        block_energy_ = 0.0F;
+        block_fill_ = 0U;
+    }
+    // Switching on starts at unity, as if the music sat at the target.
+    if (!was_enabled) lev_power_ = lev_.target_power;
+    // A new target or maximum cut takes effect at once (smoothed).
+    float gain = 1.0F;
+    if (lev_power_ > lev_.target_power) gain = std::sqrt(lev_.target_power / lev_power_);
+    lev_target_ = gain < lev_.min_gain ? lev_.min_gain : gain;
+}
+
+void SourceDsp::end_meter_block() noexcept {
+    const float z = block_energy_ * lev_.power_scale;
+    block_energy_ = 0.0F;
+    block_fill_ = 0U;
+    if (z >= lev_.gate_power) lev_power_ += (z - lev_power_) * (z > lev_power_ ? lev_.attack : lev_.release);
+    float gain = 1.0F;
+    if (lev_power_ > lev_.target_power) gain = std::sqrt(lev_.target_power / lev_power_);
+    lev_target_ = gain < lev_.min_gain ? lev_.min_gain : gain;
+}
+
+float SourceDsp::leveler_gain_db() const noexcept {
+    return lev_gain_ > 0.0F ? 20.0F * std::log10(lev_gain_) : -200.0F;
 }
 
 void SourceDsp::reset_state() noexcept {

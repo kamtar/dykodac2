@@ -16,6 +16,16 @@
 // SVF stays near -140 dBFS (the RT1011 FPU is single precision only). The
 // Biquad form is kept for analysis (worst-case boost, configurator plots).
 //
+// Two more SVF slots behind the EQ carry the loudness compensation (ISO 226
+// low and high shelf, set from the host volume). They are not part of the
+// boost compensation: their boost never exceeds the host attenuation below
+// the reference volume, so the output never exceeds the reference level.
+//
+// The loudness leveler meters the input (before EQ) with the BS.1770
+// K-weighting, averages 100 ms block energies with asymmetric time
+// constants and turns the chain down (never up) towards a target loudness.
+// Its gain is a per-sample smoothed multiplier at the end of the chain.
+//
 // Live changes are click-free: set_design() glides every parameter (band
 // tuning and mix, trims, crossfeed amount) linearly to the new design over
 // ramp_seconds. Bands that appear or disappear fade from or to unity.
@@ -57,13 +67,41 @@ struct CrossfeedCoefficients {
     float gain{1.0F};
 };
 
+// Slots behind the user EQ bands for loudness compensation.
+inline constexpr std::size_t loudness_bass_slot = settings::eq_band_count;
+inline constexpr std::size_t loudness_treble_slot = settings::eq_band_count + 1U;
+inline constexpr std::size_t dsp_band_count = settings::eq_band_count + 2U;
+
+// ISO 226:2003 fit (80 phon reference, 10-40 dB attenuation, within about
+// 1 dB from 20 Hz to 12.5 kHz): shelf gain per dB of attenuation.
+inline constexpr float loudness_bass_hz = 111.0F;
+inline constexpr float loudness_bass_q = 0.38F;
+inline constexpr float loudness_bass_per_db = 0.56F;
+inline constexpr float loudness_treble_hz = 10'200.0F;
+inline constexpr float loudness_treble_q = 1.22F;
+inline constexpr float loudness_treble_per_db = 0.17F;
+
+struct LevelerDesign {
+    bool enabled{false};
+    Biquad k_shelf{};   // BS.1770 stage 1 (high shelf)
+    Biquad k_highpass{}; // BS.1770 stage 2 (RLB high-pass)
+    std::uint32_t block_frames{4'800U};
+    float attack{0.0F};  // per-block energy smoothing while louder
+    float release{0.0F}; // per-block energy smoothing while quieter
+    float smooth{0.0F};  // per-frame gain smoothing
+    float power_scale{0.0F};   // block energy -> mean square re full scale
+    float target_power{0.0F};  // mean square of the target loudness
+    float gate_power{0.0F};    // blocks below this are silence: hold
+    float min_gain{1.0F};      // 10^(-max_cut / 20)
+};
+
 struct SourceDspDesign {
     std::uint32_t sample_rate_hz{0U};
     // Slot i of each channel is band i; inactive slots are skipped.
     std::array<Biquad, settings::eq_band_count> left{};
     std::array<Biquad, settings::eq_band_count> right{};
-    std::array<SvfParams, settings::eq_band_count> left_svf{};
-    std::array<SvfParams, settings::eq_band_count> right_svf{};
+    std::array<SvfParams, dsp_band_count> left_svf{};
+    std::array<SvfParams, dsp_band_count> right_svf{};
     std::uint16_t left_mask{0U};
     std::uint16_t right_mask{0U};
     CrossfeedCoefficients crossfeed{};
@@ -77,6 +115,10 @@ struct SourceDspDesign {
     // time-aligned with the EQ it compensates (the output gain sits behind
     // the interpolator latency) and glides together with it.
     float makeup{1.0F};
+    // Loudness compensation shelf gains in effect (dB >= 0).
+    float loudness_bass_db{0.0F};
+    float loudness_treble_db{0.0F};
+    LevelerDesign leveler{};
     bool identity{true};
 };
 
@@ -90,7 +132,16 @@ bool band_is_neutral(const settings::EqBand& band) noexcept;
 // |H(e^jw)| of one biquad at angular frequency w (radians per sample),
 // evaluated in the cancellation-free phi = sin^2(w/2) form.
 float biquad_magnitude(const Biquad& biquad, float w) noexcept;
+// Everything except the loudness compensation (which only depends on the
+// host volume and is added by apply_loudness_compensation()).
 SourceDspDesign design_source_dsp(const settings::Settings& s, std::uint32_t sample_rate_hz) noexcept;
+// Sets the loudness slots for the host volume (1/256 dB). Cheap: no boost
+// analysis, so it can follow every volume step.
+void apply_loudness_compensation(SourceDspDesign& d, const settings::Settings& s,
+                                 std::int16_t host_volume_db_8_8) noexcept;
+// Shelf gains (dB) of the loudness compensation at a host volume.
+void loudness_shelf_gains(const settings::Settings& s, std::int16_t host_volume_db_8_8,
+                          float& bass_db, float& treble_db) noexcept;
 
 class SourceDsp {
 public:
@@ -107,13 +158,17 @@ public:
     // True while nothing (not even a glide) changes a sample.
     bool identity() const noexcept { return idle_; }
     bool ramping() const noexcept { return ramp_steps_left_ != 0U; }
+    // Leveler gain currently applied (dB <= 0) and its target.
+    float leveler_gain_db() const noexcept;
+    float leveler_target_gain() const noexcept { return lev_target_; }
 
     inline void process(float& left, float& right) noexcept {
         if (idle_) return;
         if (ramp_steps_left_ != 0U && ++ramp_phase_ == ramp_block_frames) advance_ramp();
         float l = left;
         float r = right;
-        for (std::size_t i = 0U; i < settings::eq_band_count; ++i) {
+        if (lev_.enabled) meter(l, r);
+        for (std::size_t i = 0U; i < dsp_band_count; ++i) {
             const auto bit = static_cast<std::uint16_t>(1U << i);
             if ((live_left_mask_ & bit) != 0U) l = run(left_[i], l);
             if ((live_right_mask_ & bit) != 0U) r = run(right_[i], r);
@@ -131,8 +186,22 @@ public:
             l += (xl - l) * xf_wet_;
             r += (xr - r) * xf_wet_;
         }
-        left = l * trim_left_;
-        right = r * trim_right_;
+        if (lev_gain_ != lev_target_) {
+            const float delta = lev_target_ - lev_gain_;
+            // Near the target the exponential step drops below one ulp of
+            // the gain and would stall; a minimum step finishes linearly.
+            constexpr float min_step = 1.0e-7F;
+            if (delta <= min_step && delta >= -min_step) {
+                lev_gain_ = lev_target_;
+                if (!lev_.enabled) update_idle(); // switched off: back to unity
+            } else {
+                float step = delta * lev_.smooth;
+                if (step < min_step && step > -min_step) step = delta > 0.0F ? min_step : -min_step;
+                lev_gain_ += step;
+            }
+        }
+        left = l * (trim_left_ * lev_gain_);
+        right = r * (trim_right_ * lev_gain_);
     }
 
 private:
@@ -156,13 +225,32 @@ private:
         b.ic2 = 2.0F * v2 - b.ic2;
         return b.p.m0 * v0 + b.p.m1 * v1 + b.p.m2 * v2;
     }
+    static inline float biquad(const Biquad& c, float x, float& s1, float& s2) noexcept {
+        // Transposed direct form II (metering only: its float noise is
+        // far below the 1 dB this measurement needs).
+        const float y = c.b0 * x + s1;
+        s1 = c.b1 * x - c.a1 * y + s2;
+        s2 = c.b2 * x - c.a2 * y;
+        return y;
+    }
+    inline void meter(float l, float r) noexcept {
+        const float kl = biquad(lev_.k_highpass, biquad(lev_.k_shelf, l, k_state_[0], k_state_[1]),
+                                k_state_[2], k_state_[3]);
+        const float kr = biquad(lev_.k_highpass, biquad(lev_.k_shelf, r, k_state_[4], k_state_[5]),
+                                k_state_[6], k_state_[7]);
+        block_energy_ += kl * kl + kr * kr;
+        if (++block_fill_ == lev_.block_frames) end_meter_block();
+    }
+    void end_meter_block() noexcept;
+    void adopt_leveler(const LevelerDesign& design, bool restart_meter) noexcept;
+    void update_idle() noexcept;
     static void update_coefficients(Band& b) noexcept;
     void advance_ramp() noexcept;
     void snap() noexcept;
 
     SourceDspDesign design_{};
-    std::array<Band, settings::eq_band_count> left_{};
-    std::array<Band, settings::eq_band_count> right_{};
+    std::array<Band, dsp_band_count> left_{};
+    std::array<Band, dsp_band_count> right_{};
     // Bands that run now: during a glide the union of old and new.
     std::uint16_t live_left_mask_{0U};
     std::uint16_t live_right_mask_{0U};
@@ -188,6 +276,15 @@ private:
     float hi_right_{0.0F};
     float in_left_{0.0F};
     float in_right_{0.0F};
+    // Leveler. The loudness estimate and gain survive stream restarts and
+    // redesigns; only the meter filters restart.
+    LevelerDesign lev_{};
+    float k_state_[8]{};
+    float block_energy_{0.0F};
+    std::uint32_t block_fill_{0U};
+    float lev_power_{0.0F}; // smoothed mean square (sum of both channels)
+    float lev_gain_{1.0F};
+    float lev_target_{1.0F};
 };
 
 } // namespace audio

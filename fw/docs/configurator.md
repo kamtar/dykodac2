@@ -38,6 +38,8 @@ itself.
 | Balance | ±12 dB | 0 | Attenuates one side only. |
 | Polarity | per channel | off | |
 | Crossfeed | off, bs2b default, Chu Moy, Jan Meier | off | bs2b first-order crossfeed. |
+| Leveler | off, slow, medium, fast; target -36 to -6 LUFS; max cut 1 to 30 dB | off, -18 LUFS, 12 dB | Cut-only automatic level (see below). |
+| Loudness compensation | on/off; reference 0 to -60 dB host volume; amount 10 to 100 %; max bass lift 1 to 20 dB | off, -10 dB, 70 %, 12 dB | ISO 226 bass/treble lift below the reference volume. |
 | Parametric EQ | 10 bands: peak, low/high shelf (Q form), low/high pass, notch; per-band L/R/both | off | ±20 dB, 10 Hz to 20 kHz, Q 0.1 to 20. |
 
 **Boost rule.** The firmware evaluates the worst-case magnitude of
@@ -46,6 +48,26 @@ centre, +0.1 dB margin). It removes that boost from the headroom
 automatically, as a makeup gain at the end of the source-rate chain, so the
 compensation is time-aligned with the EQ and glides together with it. The app shows the same number, computed by
 `tools/dykodac_config/eq_math.py`, which mirrors the firmware.
+
+**Leveler.** Meters the input (before EQ) with the BS.1770 K-weighting in
+100 ms blocks and smooths the block energy with an attack/release time
+constant (slow 4 s / 30 s, medium 1.5 s / 10 s, fast 0.5 s / 3 s). When the
+smoothed loudness is above the target, the chain is turned down by the
+difference, at most by the maximum cut. It never turns anything up, so it
+cannot clip and needs no limiter. Blocks below -50 LUFS (silence, track gaps,
+fade tails) hold the current gain. The gain glides per sample (100 ms time
+constant). The DAC has no track boundaries, so this is a slow automatic
+volume knob, not per-track ReplayGain; that remains the player's job.
+
+**Loudness compensation.** Below the reference host volume the ear loses
+bass (and some treble). Two shelves behind the EQ follow the host volume:
++0.56 dB per dB of attenuation at a 111 Hz low shelf (Q 0.38) and +0.17 dB
+per dB at a 10.2 kHz high shelf (Q 1.22), scaled by the amount. This matches
+the ISO 226:2003 contours (80 phon reference, 10 to 40 dB down) within about
+1 dB from 20 Hz to 12.5 kHz. The lift is always smaller than the attenuation
+below the reference, so the output never exceeds the reference level and the
+shelves stay out of the boost rule. When the volume goes down, the lift
+follows about 24 ms later, after the lower output gain has arrived.
 
 **EQ filters.** Each band runs as a trapezoidal state-variable filter (Simper)
 with exactly the RBJ cookbook response. A direct-form biquad in float32
@@ -65,7 +87,7 @@ neutral chain copy samples bit for bit.
 ## Where the processing runs
 
 ```
-USB 24-bit -> float -> [EQ (SVF) -> crossfeed -> balance/polarity x makeup(-boost)]   (source rate, main context)
+USB 24-bit -> float -> [EQ (SVF) -> loudness shelves -> crossfeed -> balance/polarity x makeup(-boost) x leveler]   (source rate, main context)
           -> 4x FFT interpolator (or bypass) -> x gain(volume + headroom)
           -> TPDF dither -> one round to 24 bit -> SAI -> CS4398
 ```

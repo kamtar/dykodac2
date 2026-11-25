@@ -363,6 +363,156 @@ void run_settings_tests() {
         expect(dsp.identity(), "neutral design is identity once the fade ends");
     }
 
+    // ---- loudness leveler and loudness compensation ---------------------
+    {
+        settings::Settings s = d;
+        s.leveler_mode = 0U; s.leveler_max_cut_db = 0U; s.leveler_target_db_8_8 = 0;
+        s.loudness_enabled = 0U; s.loudness_amount_pct = 0U; s.loudness_reference_db_8_8 = 0;
+        s.loudness_max_boost_db = 0U;
+        expect(settings::validate(s) == settings::Invalid::None, "records from before leveler/loudness are valid (off)");
+        settings::upgrade(s);
+        expect(std::memcmp(&s, &d, sizeof(s)) == 0, "old records upgrade to the default parameters");
+        MockBackend legacy;
+        legacy.has_record = true;
+        legacy.stored = s;
+        legacy.stored.leveler_max_cut_db = 0U; legacy.stored.leveler_target_db_8_8 = 0;
+        legacy.stored.loudness_amount_pct = 0U; legacy.stored.loudness_reference_db_8_8 = 0;
+        legacy.stored.loudness_max_boost_db = 0U;
+        app::ConfigService booted;
+        booted.boot(legacy);
+        upload(booted, legacy, d);
+        expect(call(booted, legacy, usb::config::Opcode::Apply).status == 0U, "defaults apply over an old record");
+        const auto info_reply = call(booted, legacy, usb::config::Opcode::Info);
+        usb::config::Info legacy_info{};
+        std::memcpy(&legacy_info, info_reply.data.data(), sizeof(legacy_info));
+        expect((legacy_info.flags & usb::config::flag_unsaved) == 0U,
+               "writing back an upgraded old record is not reported as unsaved");
+        s = d; s.leveler_mode = 4U;
+        expect(settings::validate(s) == settings::Invalid::Leveler, "unknown leveler mode rejected");
+        s = d; s.leveler_mode = 2U; s.leveler_target_db_8_8 = -2 * 256;
+        expect(settings::validate(s) == settings::Invalid::Leveler, "leveler target too high rejected");
+        s = d; s.leveler_mode = 2U; s.leveler_max_cut_db = 0U;
+        expect(settings::validate(s) == settings::Invalid::Leveler, "zero leveler cut rejected");
+        s = d; s.loudness_enabled = 1U; s.loudness_reference_db_8_8 = 256;
+        expect(settings::validate(s) == settings::Invalid::Loudness, "positive loudness reference rejected");
+        s = d; s.loudness_enabled = 1U; s.loudness_amount_pct = 101U;
+        expect(settings::validate(s) == settings::Invalid::Loudness, "loudness amount over 100 % rejected");
+        s = d; s.leveler_mode = 3U; s.loudness_enabled = 1U;
+        expect(settings::validate(s) == settings::Invalid::None, "default leveler/loudness values are valid");
+        s = d; s.reserved1[0] = 1U;
+        expect(settings::validate(s) == settings::Invalid::Reserved, "remaining reserved bytes still checked");
+    }
+    {
+        // Shelf gains follow the attenuation below the reference and cap.
+        settings::Settings s = d;
+        s.loudness_enabled = 1U; s.loudness_amount_pct = 100U;
+        s.loudness_reference_db_8_8 = -10 * 256; s.loudness_max_boost_db = 12U;
+        float bass = 0.0F, treble = 0.0F;
+        audio::loudness_shelf_gains(s, -5 * 256, bass, treble);
+        expect(bass == 0.0F && treble == 0.0F, "no loudness compensation above the reference");
+        audio::loudness_shelf_gains(s, -20 * 256, bass, treble);
+        expect(std::fabs(bass - 5.6F) < 1.0e-4F && std::fabs(treble - 1.7F) < 1.0e-4F,
+               "loudness compensation follows ISO 226 fit");
+        audio::loudness_shelf_gains(s, -127 * 256, bass, treble);
+        expect(bass == 12.0F && std::fabs(treble - 12.0F * 0.17F / 0.56F) < 1.0e-4F,
+               "loudness compensation caps and keeps its shape");
+        s.loudness_enabled = 0U;
+        audio::loudness_shelf_gains(s, -60 * 256, bass, treble);
+        expect(bass == 0.0F && treble == 0.0F, "loudness compensation off");
+
+        // At any frequency the compensated level stays below the reference
+        // level (volume + boost <= reference), so it cannot clip.
+        s.loudness_enabled = 1U; s.loudness_max_boost_db = 20U;
+        for (const double fs : {44'100.0, 48'000.0}) {
+            for (int vol = -10; vol >= -60; vol -= 5) {
+                auto dd = audio::design_source_dsp(s, static_cast<std::uint32_t>(fs));
+                audio::apply_loudness_compensation(dd, s, static_cast<std::int16_t>(vol * 256));
+                expect(!dd.identity || vol == -10, "loudness slots make the chain non-identity");
+                expect(dd.boost_db == 0.0F, "loudness compensation is not part of the boost analysis");
+                const settings::EqBand bass_band{2U, 3U, 0U, audio::loudness_bass_hz, dd.loudness_bass_db,
+                                                 audio::loudness_bass_q};
+                const settings::EqBand treble_band{3U, 3U, 0U, audio::loudness_treble_hz, dd.loudness_treble_db,
+                                                   audio::loudness_treble_q};
+                const auto bb = audio::design_band(bass_band, static_cast<std::uint32_t>(fs));
+                const auto tb = audio::design_band(treble_band, static_cast<std::uint32_t>(fs));
+                float worst = -1000.0F;
+                for (double f = 10.0; f < 0.499 * fs; f *= 1.01) {
+                    const float total = (dd.loudness_bass_db > 0.0F ? db_at(bb, f, fs) : 0.0F) +
+                                        (dd.loudness_treble_db > 0.0F ? db_at(tb, f, fs) : 0.0F);
+                    if (total > worst) worst = total;
+                }
+                expect(static_cast<float>(vol) + worst <= -10.0F + 1.0e-3F,
+                       "loudness boost never exceeds the attenuation below the reference");
+            }
+        }
+
+        // Measured: at -30 dB host volume the chain lifts 50 Hz relative to 1 kHz.
+        auto dd = audio::design_source_dsp(s, 48'000U);
+        audio::apply_loudness_compensation(dd, s, static_cast<std::int16_t>(-30 * 256));
+        audio::SourceDsp dsp;
+        dsp.set_design(dd);
+        const double lift = measured_db(dsp, 50.0, 48'000.0) - measured_db(dsp, 1'000.0, 48'000.0);
+        std::cout << "  loudness @-30 dB: 50 Hz vs 1 kHz +" << lift << " dB (bass shelf "
+                  << dd.loudness_bass_db << " dB)\n";
+        // ISO 226 asks for +8.2 dB at 50 Hz for 20 dB below an 80 phon reference.
+        expect(std::fabs(lift - 8.2) < 0.6, "loudness compensation lifts the bass at low volume");
+    }
+    {
+        // Leveler: a loud input converges to the target, a quiet one is left
+        // alone, silence holds the gain.
+        settings::Settings s = d;
+        s.leveler_mode = 3U; s.leveler_target_db_8_8 = -20 * 256; s.leveler_max_cut_db = 12U;
+        const double fs = 48'000.0;
+        auto run_tone = [&](audio::SourceDsp& dsp, double dbfs, double seconds) {
+            const double amplitude = 8'388'608.0 * std::pow(10.0, dbfs / 20.0);
+            const int n = static_cast<int>(seconds * fs);
+            float peak = 0.0F;
+            for (int i = 0; i < n; ++i) {
+                float l = static_cast<float>(amplitude * std::sin(2.0 * pi * 1'000.0 * i / fs));
+                float r = l;
+                dsp.process(l, r);
+                if (i > n - 4800 && std::fabs(l) > peak) peak = std::fabs(l);
+            }
+            return 20.0 * std::log10(peak / amplitude);
+        };
+        auto design = audio::design_source_dsp(s, 48'000U);
+        expect(!design.identity && design.boost_db == 0.0F, "leveler alone runs the chain without boost");
+        audio::SourceDsp dsp;
+        dsp.set_design(design);
+        // A stereo 1 kHz sine at -6 dBFS: K-weighted about -6 + 0.7 - 3 + 3 = -5.3 LUFS
+        // (two channels add 3 dB); expect a cut near 20 - 5.3 = 14.7, capped at 12.
+        double gain = run_tone(dsp, -6.0, 20.0);
+        std::cout << "  leveler: -6 dBFS stereo sine -> " << gain << " dB (cap 12)\n";
+        expect(std::fabs(gain + 12.0) < 0.2, "leveler cut is limited to the maximum cut");
+        expect(std::fabs(dsp.leveler_gain_db() + 12.0F) < 0.2F, "leveler gain is reported");
+        s.leveler_max_cut_db = 30U;
+        dsp.set_design(audio::design_source_dsp(s, 48'000U));
+        gain = run_tone(dsp, -6.0, 20.0);
+        // BS.1770 of a stereo sine: L = -0.691 + 10 log10(2 * K(1k)^2 * A^2 / 2).
+        const double k1k = 20.0 * std::log10(audio::biquad_magnitude(design.leveler.k_shelf,
+                                                 static_cast<float>(2.0 * pi * 1'000.0 / fs)) *
+                                             audio::biquad_magnitude(design.leveler.k_highpass,
+                                                 static_cast<float>(2.0 * pi * 1'000.0 / fs)));
+        const double lufs = -0.691 + k1k - 6.0;
+        std::cout << "  leveler: input " << lufs << " LUFS -> gain " << gain << " dB\n";
+        expect(std::fabs((lufs + gain) - (-20.0)) < 0.3, "leveler reaches the target loudness");
+        // Silence holds the cut (track gaps do not release it).
+        const double held = dsp.leveler_gain_db();
+        for (int i = 0; i < 48'000 * 5; ++i) { float l = 0.0F, r = 0.0F; dsp.process(l, r); }
+        // (one last partial tone block may still release by ~0.15 dB in Fast mode)
+        expect(std::fabs(dsp.leveler_gain_db() - held) < 0.3, "silence holds the leveler gain");
+        // Quiet material (below the target) releases back to unity, never above.
+        gain = run_tone(dsp, -40.0, 30.0);
+        expect(std::fabs(gain) < 0.05 && dsp.leveler_gain_db() <= 0.0F, "quiet material is not boosted");
+        // Switching off glides back to unity and lets the chain go idle.
+        run_tone(dsp, -6.0, 10.0);
+        s.leveler_mode = 0U;
+        dsp.set_design(audio::design_source_dsp(s, 48'000U));
+        expect(!dsp.identity(), "leveler switched off still glides");
+        run_tone(dsp, -60.0, 2.0);
+        expect(dsp.identity() && dsp.leveler_gain_db() == 0.0F, "leveler off returns to unity and idle");
+    }
+
     // ---- headroom-aware gain --------------------------------------------
     expect(audio::mcu_gain_from_uac2_db(0, 0, 0.0F) == 1.0F, "0 dB volume and headroom is exactly unity");
     expect(std::fabs(audio::mcu_gain_from_uac2_db(0, -6 * 256, 0.0F) - 0.501187F) < 1.0e-5F, "6 dB headroom");

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QToolButton,
-    QProgressDialog, QPushButton, QRadioButton, QSizePolicy, QSlider, QSplitter, QTableWidget, QTabWidget,
+    QProgressDialog, QPushButton, QRadioButton, QSizePolicy, QSlider, QSpinBox, QSplitter, QTableWidget, QTabWidget,
     QToolBar, QVBoxLayout, QWidget,
 )
 
@@ -66,6 +66,7 @@ QPushButton:pressed { background: #3D4450; }
 QPushButton#primary { background: #2B5D7A; border-color: #3A7CA3; }
 QPushButton#primary:hover { background: #336F92; }
 QPushButton:disabled { color: #6B6F78; }
+QPushButton#ab:checked { background: #8A5A12; border-color: #FFB74D; color: #FFF; font-weight: 600; }
 QToolBar { border: none; spacing: 6px; padding: 4px; }
 QTableWidget { gridline-color: #343842; }
 QHeaderView::section { background: #262A31; border: none; padding: 4px; color: #9FB3C8; }
@@ -227,6 +228,7 @@ class MainWindow(QMainWindow):
         self.s = p.Settings()                            # what the GUI shows
         self._loading = False
         self._busy = False
+        self._ab_sent: bytes | None = None  # packed bypass settings last written for A/B
 
         self._build_ui()
         self.live_timer = QTimer(self, singleShot=True, interval=180, timeout=self._live_write)
@@ -391,6 +393,64 @@ class MainWindow(QMainWindow):
                              "channel into the other, so hard-panned recordings sound less fatiguing.")
         gf.addRow("Crossfeed", self.c_xf)
         lv.addWidget(g)
+
+        g = QGroupBox("Loudness")
+        gf = QFormLayout(g)
+        lev = QHBoxLayout()
+        self.c_leveler = QComboBox()
+        self.c_leveler.addItems(p.LEVELER_NAMES)
+        self.c_leveler.setToolTip(
+            "Automatic leveler: measures loudness (EBU R128 / BS.1770) and slowly turns loud\n"
+            "material down to the target. It never turns anything up, so it cannot clip.\n"
+            "Speed = attack / release time. Silence and track gaps hold the current level.")
+        self.s_lev_target = QDoubleSpinBox(minimum=p.MIN_LEVELER_TARGET, maximum=p.MAX_LEVELER_TARGET,
+                                           singleStep=1.0, decimals=1, suffix=" LUFS")
+        self.s_lev_target.setToolTip("Loudness the leveler turns loud material down to.\n"
+                                     "Modern pop/rock masters are about −8..−12 LUFS, older or classical −16..−24.")
+        self.s_lev_cut = QSpinBox(minimum=p.MIN_LEVELER_CUT, maximum=p.MAX_LEVELER_CUT, suffix=" dB")
+        self.s_lev_cut.setToolTip("Largest level reduction the leveler may apply.")
+        lev.addWidget(self.c_leveler, 1)
+        lev.addWidget(self.s_lev_target)
+        lev.addWidget(QLabel("max cut"))
+        lev.addWidget(self.s_lev_cut)
+        gf.addRow("Leveler", lev)
+        self.l_leveler = QLabel()
+        gf.addRow("", self.l_leveler)
+        loud = QHBoxLayout()
+        self.cb_loud = QCheckBox("On")
+        self.cb_loud.setToolTip(
+            "Loudness compensation (ISO 226 equal-loudness contours): below the reference volume\n"
+            "the ear loses bass (and some treble), so both are lifted as the host volume goes down.\n"
+            "The lift never exceeds the volume reduction, so it cannot clip.")
+        self.s_loud_ref = QDoubleSpinBox(minimum=p.MIN_LOUDNESS_REFERENCE, maximum=0.0, singleStep=1.0,
+                                         decimals=1, suffix=" dB")
+        self.s_loud_ref.setToolTip("Host volume at which you hear music at its intended (loud) level:\n"
+                                   "flat here and above, compensated below.")
+        self.b_loud_ref = QPushButton("Use current")
+        self.b_loud_ref.setToolTip("Take the host volume the DAC is set to right now as the reference")
+        self.b_loud_ref.clicked.connect(self._loudness_reference_from_volume)
+        loud.addWidget(self.cb_loud)
+        loud.addWidget(QLabel("reference"))
+        loud.addWidget(self.s_loud_ref)
+        loud.addWidget(self.b_loud_ref)
+        loud.addStretch()
+        gf.addRow("Compensation", loud)
+        loud2 = QHBoxLayout()
+        self.s_loud_amount = QSpinBox(minimum=p.MIN_LOUDNESS_AMOUNT, maximum=p.MAX_LOUDNESS_AMOUNT,
+                                      singleStep=5, suffix=" %")
+        self.s_loud_amount.setToolTip("Strength relative to the ISO 226 contours (100 % = full correction).")
+        self.s_loud_boost = QSpinBox(minimum=p.MIN_LOUDNESS_BOOST, maximum=p.MAX_LOUDNESS_BOOST, suffix=" dB")
+        self.s_loud_boost.setToolTip("Largest bass lift (the treble lift is scaled with it).")
+        loud2.addWidget(QLabel("amount"))
+        loud2.addWidget(self.s_loud_amount)
+        loud2.addWidget(QLabel("max bass lift"))
+        loud2.addWidget(self.s_loud_boost)
+        loud2.addStretch()
+        gf.addRow("", loud2)
+        self.l_loud = QLabel()
+        self.l_loud.setWordWrap(True)
+        gf.addRow("", self.l_loud)
+        lv.addWidget(g)
         lv.addStretch()
         split.addWidget(left)
 
@@ -403,6 +463,15 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         self.cb_eq = QCheckBox("Enable EQ")
         top.addWidget(self.cb_eq)
+        self.b_ab = QPushButton("A/B: bypass EQ")
+        self.b_ab.setObjectName("ab")
+        self.b_ab.setCheckable(True)
+        self.b_ab.setShortcut("Ctrl+B")
+        self.b_ab.setToolTip("Hold-free A/B test (Ctrl+B): the DAC plays without EQ but at the same level\n"
+                             "reduction the EQ causes, so loudness doesn't bias the comparison.\n"
+                             "Only in the DAC's RAM; never saved. Click again to switch the EQ back on.")
+        self.b_ab.toggled.connect(self._ab_toggled)
+        top.addWidget(self.b_ab)
         top.addSpacing(18)
         top.addWidget(QLabel("Preset"))
         self.preset_combo = QComboBox()
@@ -464,8 +533,11 @@ class MainWindow(QMainWindow):
 
         for w in (self.r_4x, self.r_bypass, self.cb_inv_l, self.cb_inv_r, self.cb_eq):
             w.toggled.connect(self._changed)
-        for w in (self.c_filter, self.c_xf):
+        for w in (self.c_filter, self.c_xf, self.c_leveler):
             w.currentIndexChanged.connect(self._changed)
+        self.cb_loud.toggled.connect(self._changed)
+        for w in (self.s_lev_target, self.s_lev_cut, self.s_loud_ref, self.s_loud_amount, self.s_loud_boost):
+            w.valueChanged.connect(self._changed)
         self.c_headroom.currentIndexChanged.connect(self._headroom_preset)
         self.s_headroom.valueChanged.connect(self._changed)
         self.s_ceiling.valueChanged.connect(self._changed)
@@ -653,6 +725,13 @@ class MainWindow(QMainWindow):
             self.cb_inv_l.setChecked(s.invert_left)
             self.cb_inv_r.setChecked(s.invert_right)
             self.c_xf.setCurrentIndex(s.crossfeed)
+            self.c_leveler.setCurrentIndex(s.leveler_mode)
+            self.s_lev_target.setValue(s.leveler_target_db)
+            self.s_lev_cut.setValue(int(s.leveler_max_cut_db))
+            self.cb_loud.setChecked(s.loudness_enabled)
+            self.s_loud_ref.setValue(s.loudness_reference_db)
+            self.s_loud_amount.setValue(int(s.loudness_amount_pct))
+            self.s_loud_boost.setValue(int(s.loudness_max_boost_db))
             self.cb_eq.setChecked(s.eq_enabled)
             for (t, ch, fr, ga, q), b in zip(self.band_widgets, s.bands):
                 t.setCurrentIndex(b.type)
@@ -675,11 +754,48 @@ class MainWindow(QMainWindow):
         s.invert_left = self.cb_inv_l.isChecked()
         s.invert_right = self.cb_inv_r.isChecked()
         s.crossfeed = self.c_xf.currentIndex()
+        s.leveler_mode = self.c_leveler.currentIndex()
+        s.leveler_target_db = round(self.s_lev_target.value() * 256) / 256
+        s.leveler_max_cut_db = self.s_lev_cut.value()
+        s.loudness_enabled = self.cb_loud.isChecked()
+        s.loudness_reference_db = round(self.s_loud_ref.value() * 256) / 256
+        s.loudness_amount_pct = self.s_loud_amount.value()
+        s.loudness_max_boost_db = self.s_loud_boost.value()
         s.eq_enabled = self.cb_eq.isChecked()
         s.bands = []
         for t, ch, fr, ga, q in self.band_widgets:
             s.bands.append(p.EqBand(t.currentIndex(), CHANNEL_VALUES[ch.currentIndex()], fr.value(), ga.value(), q.value()))
         return s
+
+    def _loudness_reference_from_volume(self):
+        if not self.info:
+            self.statusBar().showMessage("Connect the DAC to read its current volume.", 3000)
+            return
+        self.s_loud_ref.setValue(max(p.MIN_LOUDNESS_REFERENCE, min(0.0, self.info.host_volume_db)))
+
+    def _render_loudness(self):
+        s, i = self.s, self.info
+        if s.leveler_mode and i is not None:
+            self.l_leveler.setText(f"Now: {i.leveler_gain_db:+.1f} dB")
+        else:
+            self.l_leveler.setText("")
+        if not s.loudness_enabled:
+            self.l_loud.setText("")
+            return
+        if i is None:
+            self.l_loud.setText("Flat at and above the reference volume.")
+            return
+        vol = i.host_volume_db
+        # What the panel would do at the current volume (the DAC's own values
+        # below follow once it has been written).
+        att = max(0.0, s.loudness_reference_db - vol)
+        bass = p.LOUDNESS_BASS_PER_DB * s.loudness_amount_pct / 100.0 * att
+        treble = p.LOUDNESS_TREBLE_PER_DB * s.loudness_amount_pct / 100.0 * att
+        if bass > s.loudness_max_boost_db:
+            treble *= s.loudness_max_boost_db / bass
+            bass = s.loudness_max_boost_db
+        self.l_loud.setText(f"At host volume {vol:+.1f} dB: bass +{bass:.1f} dB (111 Hz shelf), "
+                            f"treble +{treble:.1f} dB (10 kHz shelf)")
 
     def _headroom_preset(self, idx):
         if idx < len(HEADROOM_PRESETS):
@@ -713,6 +829,11 @@ class MainWindow(QMainWindow):
             if s.dac_ceiling_db > -6 else "")
         self.l_balance.setText("centre" if s.balance_db == 0 else
                                f"{abs(s.balance_db):.2f} dB {'→ R' if s.balance_db > 0 else '← L'}")
+        for w in (self.s_lev_target, self.s_lev_cut):
+            w.setEnabled(s.leveler_mode != 0)
+        for w in (self.s_loud_ref, self.b_loud_ref, self.s_loud_amount, self.s_loud_boost):
+            w.setEnabled(s.loudness_enabled)
+        self._render_loudness()
         for i, (t, ch, fr, ga, q) in enumerate(self.band_widgets):
             active = t.currentIndex() != p.FILTER_OFF
             gain_used = t.currentIndex() in (p.FILTER_PEAKING, p.FILTER_LOW_SHELF, p.FILTER_HIGH_SHELF)
@@ -730,6 +851,7 @@ class MainWindow(QMainWindow):
         if self.dev:
             self.dev.close()
         self.dev, self.info, self.device_settings = None, None, None
+        self._ab_set(False)  # _ab_sent is kept so a reconnect can restore the EQ
         self._set_conn("Not connected", BAD)
         self.devline.setText(why or "Plug in the DykoDAC2 (USB). It is detected automatically.")
         self._update_buttons()
@@ -792,6 +914,10 @@ class MainWindow(QMainWindow):
                 parts.append(f"<span style='color:{GOOD}'>bit-perfect</span>")
         parts.append(f"host volume {i.host_volume_db:+.1f} dB")
         parts.append(f"effective headroom {i.effective_headroom_db:+.2f} dB")
+        if i.leveler_gain_db < -0.05:
+            parts.append(f"leveler {i.leveler_gain_db:+.1f} dB")
+        if i.loudness_bass_db > 0.05:
+            parts.append(f"loudness +{i.loudness_bass_db:.1f}/+{i.loudness_treble_db:.1f} dB")
         if i.flash_record:
             flash = (f"<span style='color:{WARN}'>RAM differs from flash</span>" if i.unsaved
                      else f"<span style='color:{GOOD}'>saved (record #{i.flash_sequence})</span>")
@@ -799,11 +925,12 @@ class MainWindow(QMainWindow):
             flash = f"<span style='color:{WARN}'>nothing saved in flash yet</span>"
         parts.append(flash)
         self.devline.setText("  ·  ".join(parts))
+        self._render_loudness()
         self._update_buttons()
 
     def _update_buttons(self):
         on = self.dev is not None and not self._busy
-        for b in (self.b_read, self.b_write, self.b_save, self.b_load, self.b_defaults):
+        for b in (self.b_read, self.b_write, self.b_save, self.b_load, self.b_defaults, self.b_ab):
             b.setEnabled(on)
         pending = self.device_settings is not None and self.device_settings.pack() != self.s.pack()
         self.b_write.setText("⇪  Write to RAM" + ("  •" if pending else ""))
@@ -821,9 +948,51 @@ class MainWindow(QMainWindow):
             self._disconnect(f"<span style='color:{BAD}'>{what} failed: {e}</span>")
         return None
 
+    # --- A/B: EQ bypass at matched level (RAM only) -------------------------------
+    def _for_device(self) -> p.Settings:
+        """What to send: the panel, or while A/B is on the panel without EQ but with
+        the level drop the EQ's boost would cause moved into the headroom."""
+        if not self.b_ab.isChecked():
+            return self.s
+        flat = copy.deepcopy(self.s)
+        flat.eq_enabled = False
+        drop = eq_math.Chain(self.s).boost_db() - eq_math.Chain(flat).boost_db()
+        flat.headroom_db = max(p.MIN_HEADROOM_DB, round((self.s.headroom_db - drop) * 256) / 256)
+        return flat
+
+    def _ab_set(self, on: bool):
+        self.b_ab.blockSignals(True)
+        self.b_ab.setChecked(on)
+        self.b_ab.blockSignals(False)
+        self.b_ab.setText("A/B: EQ BYPASSED" if on else "A/B: bypass EQ")
+
+    def _ab_toggled(self, on: bool):
+        self._ab_set(on)
+        if not self.dev or self._busy:
+            self._ab_set(False)
+            return
+        if not self._write():
+            self._ab_set(not on)
+            return
+        if on:
+            f = self._for_device()
+            self.statusBar().showMessage(f"A/B: EQ bypassed at matched level (headroom {f.headroom_db:+.2f} dB, "
+                                         "RAM only). Click again or Ctrl+B to switch the EQ back on.")
+        else:
+            self.statusBar().showMessage("A/B: EQ back on.", 3000)
+
     def on_read(self, quiet=False):
         s = self._guard("Read", self.dev.read_settings) if self.dev else None
+        if s and self._ab_sent is not None and s.pack() == self._ab_sent:
+            # The DAC is running our A/B bypass: keep the panel's real settings.
+            self.device_settings = copy.deepcopy(self.s)
+            if not self.b_ab.isChecked():  # A/B was dropped (e.g. reconnect): restore the EQ
+                self._write()
+            self._poll()
+            return
         if s:
+            self._ab_set(False)
+            self._ab_sent = None
             self.device_settings = copy.deepcopy(s)
             self._load_into_widgets(s)
             if not quiet:
@@ -835,8 +1004,10 @@ class MainWindow(QMainWindow):
         if problems:
             QMessageBox.warning(self, APP_NAME, "\n".join(problems))
             return False
-        ok = self._guard("Write", lambda: self.dev.write_settings(self.s) or True)
+        out = self._for_device()
+        ok = self._guard("Write", lambda: self.dev.write_settings(out) or True)
         if ok:
+            self._ab_sent = out.pack() if out is not self.s else None
             self.device_settings = copy.deepcopy(self.s)
             self._poll()
         return bool(ok)
@@ -851,6 +1022,8 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Live: applied", 1500)
 
     def on_load(self):
+        self._ab_set(False)
+        self._ab_sent = None
         s = self._guard("Load from flash", self.dev.load)
         if s:
             self.device_settings = copy.deepcopy(s)
@@ -861,6 +1034,8 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, APP_NAME, "Put factory defaults into the DAC's RAM?\n"
                                 "(Flash keeps your saved settings until you press Save.)") != QMessageBox.Yes:
             return
+        self._ab_set(False)
+        self._ab_sent = None
         s = self._guard("Defaults", self.dev.defaults)
         if s:
             self.device_settings = copy.deepcopy(s)
@@ -868,6 +1043,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Factory defaults applied to RAM.", 4000)
 
     def on_save(self):
+        if self.b_ab.isChecked():
+            self.b_ab.setChecked(False)  # never save the A/B bypass: put the EQ back first
+            if self.b_ab.isChecked():
+                return
         if self.device_settings is None or self.device_settings.pack() != self.s.pack():
             if not self._write():
                 return
@@ -987,6 +1166,8 @@ class MainWindow(QMainWindow):
         if self._busy:
             ev.ignore()
             return
+        if self.b_ab.isChecked():
+            self.b_ab.setChecked(False)  # don't leave the DAC running without its EQ
         if self.dev:
             self.dev.close()
         super().closeEvent(ev)
