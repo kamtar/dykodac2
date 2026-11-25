@@ -201,6 +201,141 @@ void run_settings_tests() {
         expect(xd.boost_db < 1.0F, "crossfeed worst-case bound stays small");
     }
 
+    // ---- mid/side crossfeeds: flat centre, head-like cues for panned -----
+    {
+        using settings::Crossfeed;
+        settings::Settings bad = d;
+        bad.crossfeed = settings::crossfeed_count;
+        expect(settings::validate(bad) == settings::Invalid::Crossfeed, "unknown crossfeed rejected");
+        struct Case { Crossfeed mode; double itd_min_ms; double itd_max_ms; double ild_lo_db; double ild_hi_db; };
+        // 100 Hz far/near ear for a hard-left source. Speakers: Brown-Duda
+        // low-frequency ITD (Woodworth delay + head-shadow group delay).
+        const Case cases[] = {
+            {Crossfeed::Natural, 0.40, 0.50, -11.0, -9.0},
+            {Crossfeed::Speakers30, 0.37, 0.44, -1.5, 0.0},
+            {Crossfeed::Speakers45, 0.51, 0.60, -1.5, 0.0},
+        };
+        for (const std::uint32_t fs : {44'100U, 48'000U}) {
+            for (const auto& c : cases) {
+                settings::Settings s = d;
+                s.crossfeed = static_cast<std::uint8_t>(c.mode);
+                expect(settings::validate(s) == settings::Invalid::None, "mid/side crossfeed is valid");
+                const auto design = audio::design_source_dsp(s, fs);
+                expect(design.crossfeed.enabled && design.crossfeed.mid_side && !design.identity,
+                       "mid/side crossfeed designs as mid/side");
+                expect(design.boost_db > 0.0F && design.boost_db < 2.5F, "mid/side crossfeed headroom cost stays small");
+                audio::SourceDsp dsp;
+                dsp.set_design(design);
+                // The centre passes bit-exactly (only the makeup gain).
+                bool exact = true;
+                for (int i = 0; i < 20'000; ++i) {
+                    const float x = static_cast<float>(0.5 * std::sin(2.0 * pi * 997.0 * i / fs) +
+                                                       0.3 * std::sin(2.0 * pi * 61.0 * i / fs));
+                    float l = x, r = x;
+                    dsp.process(l, r);
+                    if (l != x * design.makeup || r != x * design.makeup) exact = false;
+                }
+                expect(exact, "mid/side crossfeed leaves the centre untouched");
+                // Hard-left 100 Hz: interaural level and delay.
+                dsp.reset_state();
+                dsp.set_design(design);
+                double li = 0.0, lq = 0.0, ri = 0.0, rq = 0.0;
+                const int n = static_cast<int>(fs);
+                for (int i = 0; i < n; ++i) {
+                    const double phase = 2.0 * pi * 100.0 * i / fs;
+                    float l = static_cast<float>(0.5 * std::sin(phase)), r = 0.0F;
+                    dsp.process(l, r);
+                    if (i < n / 2) continue;
+                    li += l * std::sin(phase); lq += l * std::cos(phase);
+                    ri += r * std::sin(phase); rq += r * std::cos(phase);
+                }
+                const double ild = 10.0 * std::log10((ri * ri + rq * rq) / (li * li + lq * lq));
+                double lag = std::atan2(lq, li) - std::atan2(rq, ri); // far ear behind
+                while (lag < 0.0) lag += 2.0 * pi;
+                while (lag >= 2.0 * pi) lag -= 2.0 * pi;
+                const double itd_ms = lag / (2.0 * pi * 100.0) * 1'000.0;
+                std::cout << "  crossfeed " << static_cast<int>(c.mode) << " @" << fs << ": boost " << design.boost_db
+                          << " dB, 100 Hz hard-left ILD " << ild << " dB, ITD " << itd_ms << " ms\n";
+                expect(ild > c.ild_lo_db && ild < c.ild_hi_db, "mid/side crossfeed low-frequency level cue");
+                expect(itd_ms > c.itd_min_ms && itd_ms < c.itd_max_ms, "mid/side crossfeed low-frequency delay cue");
+            }
+        }
+    }
+
+    // ---- switching between crossfeed presets glides without clicks --------
+    {
+        constexpr double fs = 48'000.0;
+        using settings::Crossfeed;
+        auto input = [](int i, float& l, float& r) {
+            l = static_cast<float>(0.3 * std::sin(2.0 * pi * 40.0 * i / fs) + 0.3 * std::sin(2.0 * pi * 1'000.0 * i / fs));
+            r = static_cast<float>(0.3 * std::sin(2.0 * pi * 40.0 * i / fs) - 0.2 * std::sin(2.0 * pi * 3'100.0 * i / fs));
+        };
+        auto run = [&](audio::SourceDsp& dsp, int from, int to, float& last) {
+            float worst = 0.0F;
+            for (int i = from; i < to; ++i) {
+                float l, r;
+                input(i, l, r);
+                dsp.process(l, r);
+                if (i > from && std::fabs(l - last) > worst) worst = std::fabs(l - last);
+                last = l;
+            }
+            return worst;
+        };
+        auto design_for = [&](Crossfeed mode) {
+            settings::Settings s = d;
+            s.crossfeed = static_cast<std::uint8_t>(mode);
+            return audio::design_source_dsp(s, 48'000U);
+        };
+        const Crossfeed sequence[] = {Crossfeed::Natural, Crossfeed::Speakers30, Crossfeed::Speakers45,
+                                      Crossfeed::Bs2bDefault, Crossfeed::Natural, Crossfeed::Off};
+        // Steady step size of every preset and of the dry signal.
+        float steady = 0.0F;
+        for (const auto mode : {Crossfeed::Off, Crossfeed::Natural, Crossfeed::Speakers30, Crossfeed::Speakers45,
+                                Crossfeed::Bs2bDefault}) {
+            audio::SourceDsp ref;
+            ref.set_design(design_for(mode));
+            float ref_last = 0.0F;
+            run(ref, 0, 24'000, ref_last);
+            steady = std::fmax(steady, run(ref, 24'000, 48'000, ref_last));
+        }
+        audio::SourceDsp dsp;
+        dsp.set_design(design_for(Crossfeed::Off));
+        float last = 0.0F;
+        int t = 0;
+        run(dsp, t, t + 24'000, last);
+        t += 24'000;
+        for (const auto mode : sequence) {
+            dsp.set_design(design_for(mode));
+            const float transition = run(dsp, t, t + 4'800, last); // two 20 ms phases fit in 100 ms
+            t += 4'800;
+            expect(!dsp.ramping(), "crossfeed preset change finishes within two glides");
+            expect(transition <= 1.05F * steady, "no click when switching crossfeed presets");
+            run(dsp, t, t + 9'600, last);
+            t += 9'600;
+        }
+        expect(dsp.identity(), "crossfeed off again ends in identity");
+
+        // A preset change lands on the same output as a chain started on it.
+        audio::SourceDsp a, fresh;
+        a.set_design(design_for(Crossfeed::Natural));
+        fresh.set_design(design_for(Crossfeed::Speakers30));
+        float la = 0.0F, lf = 0.0F;
+        run(a, 0, 24'000, la);
+        a.set_design(design_for(Crossfeed::Speakers30));
+        run(a, 24'000, 48'000, la);
+        run(fresh, 0, 48'000, lf);
+        float max_diff = 0.0F;
+        for (int i = 48'000; i < 52'000; ++i) {
+            float l, r;
+            input(i, l, r);
+            float fl = l, fr = r;
+            a.process(l, r);
+            fresh.process(fl, fr);
+            max_diff = std::fmax(max_diff, std::fmax(std::fabs(l - fl), std::fabs(r - fr)));
+        }
+        expect(max_diff < 1.0e-5F, "crossfeed preset change ends on the new design");
+    }
+
     // ---- SVF runtime: same response as the RBJ biquads ------------------
     for (const std::uint32_t fs : {44'100U, 48'000U}) {
         const settings::EqBand bands[] = {

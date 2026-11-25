@@ -1,6 +1,7 @@
 #include "audio/source_dsp.hpp"
 
 #include <cmath>
+#include <complex>
 
 namespace audio {
 namespace {
@@ -14,10 +15,133 @@ constexpr CrossfeedPreset crossfeed_presets[settings::crossfeed_count] = {
     {0.0, 0.0}, {700.0, 4.5}, {700.0, 6.0}, {650.0, 9.5},
 };
 
-// Bauer stereophonic-to-binaural (bs2b) first-order crossfeed.
+std::uint16_t frames(double seconds, std::uint32_t rate) noexcept {
+    return static_cast<std::uint16_t>(seconds * rate + 0.5);
+}
+
+FirstOrder one_pole_lowpass(double fc, double gain, std::uint32_t rate) noexcept {
+    const double x = std::exp(-2.0 * pi * fc / rate);
+    return {static_cast<float>(gain * (1.0 - x)), 0.0F, static_cast<float>(x)};
+}
+
+FirstOrder one_pole_highpass(double fc, std::uint32_t rate) noexcept {
+    const double x = std::exp(-2.0 * pi * fc / rate);
+    return {static_cast<float>(0.5 * (1.0 + x)), static_cast<float>(-0.5 * (1.0 + x)), static_cast<float>(x)};
+}
+
+// "Natural": the centre passes untouched; the side signal loses its bass
+// through a 500 Hz low-passed copy of itself, 0.1 ms late, so a panned
+// source reaches the far ear 0.45 ms later (delay plus low-pass lag, about
+// a +-30 deg speaker) and 10 dB lower at low frequencies, as from a head.
+// S' = (S - 2 g LP(S[n-d])) * peak: the 1.2 kHz cut removes the +2 dB
+// bump where the delayed copy turns in phase (worst-case gain 2 -> 0.4 dB),
+// and leaves the side within 0.5 dB above 2.5 kHz.
+void design_natural(CrossfeedCoefficients& c, std::uint32_t rate) noexcept {
+    constexpr double feed = 0.25; // g
+    c.near = {};
+    c.far = one_pole_lowpass(500.0, 2.0 * feed, rate);
+    c.far_delay = frames(0.10e-3, rate);
+    c.reflection_count = 0U;
+    const settings::EqBand post{static_cast<std::uint8_t>(settings::FilterType::Peaking), settings::channel_both,
+                                0U, 1'200.0F, -2.0F, 0.5F};
+    c.post_enabled = true;
+    c.post = design_band(post, rate);
+    c.post_svf = design_band_svf(post, rate);
+}
+
+// Virtual speakers at +-azimuth: Brown & Duda spherical head (radius
+// 8.75 cm) with its one-pole/one-zero head shadow per ear and the Woodworth
+// interaural delay, plus six early reflections per ear. Run in mid/side
+// form: with the physical near-ear response D and far-ear response C, the
+// side signal gets (D - C) / 2 and the mid signal passes flat instead of
+// (D + C) / 2. A hard-panned source keeps the model's interaural delay at
+// low frequencies and its level difference at high ones, while the
+// phantom centre avoids the ~10 dB crosstalk comb (1-1.4 kHz) that no EQ
+// can fill without colouring every panned source and costing ~11 dB of
+// headroom. Reflections are band-limited (500 Hz - 6 kHz) so they add
+// space without a low-mid comb.
+void design_speakers(CrossfeedCoefficients& c, double azimuth_deg, std::uint32_t rate) noexcept {
+    constexpr double radius = 0.0875;
+    constexpr double sound = 343.0;
+    const double az = azimuth_deg * pi / 180.0;
+    // Head shadow (1 + alpha s / 2w0) / (1 + s / 2w0), w0 = c / a, with
+    // alpha from the angle between source and ear axis (Brown-Duda).
+    auto shadow = [&](double from_ear_deg) {
+        const double alpha = 1.05 + 0.95 * std::cos(from_ear_deg / 150.0 * pi);
+        const double kt = 2.0 * rate * radius / (2.0 * sound);
+        const double den = 1.0 + kt;
+        // Folded in: the 1/2 that normalises D + C to unity at DC.
+        return FirstOrder{static_cast<float>(0.5 * (1.0 + alpha * kt) / den),
+                          static_cast<float>(0.5 * (1.0 - alpha * kt) / den),
+                          static_cast<float>(-(1.0 - kt) / den)};
+    };
+    c.near = shadow(90.0 - azimuth_deg);
+    c.far = shadow(90.0 + azimuth_deg);
+    c.far_delay = frames(radius / sound * (az + std::sin(az)), rate);
+    // (near-ear ms, gain, far-ear ms, gain): desk/floor, near and far side
+    // walls, ceiling, two late ones.
+    struct Reflection { double near_ms; double near_gain; double far_ms; double far_gain; };
+    constexpr Reflection pattern[] = {
+        {1.30, 0.20, 1.55, 0.15}, {2.90, 0.16, 3.20, 0.10}, {3.70, 0.09, 3.95, 0.13},
+        {4.80, 0.12, 5.00, 0.11}, {6.90, 0.08, 7.30, 0.07}, {8.60, 0.07, 8.85, 0.07},
+    };
+    constexpr double level = 0.35 * 0.5; // reflection level and the DC normalisation
+    std::size_t n = 0U;
+    for (const auto& r : pattern) {
+        c.reflections[n++] = {frames(r.near_ms * 1.0e-3, rate), static_cast<float>(level * r.near_gain)};
+        c.reflections[n++] = {frames(r.far_ms * 1.0e-3, rate), static_cast<float>(-level * r.far_gain)};
+    }
+    c.reflection_count = static_cast<std::uint8_t>(n);
+    c.reflection_highpass = one_pole_highpass(500.0, rate);
+    c.reflection_lowpass = one_pole_lowpass(6'000.0, 1.0, rate);
+    c.post_enabled = false;
+}
+
+std::complex<double> first_order_response(const FirstOrder& f, std::complex<double> zinv) noexcept {
+    return (static_cast<double>(f.b0) + static_cast<double>(f.b1) * zinv) / (1.0 - static_cast<double>(f.d1) * zinv);
+}
+
+// Complex near-ear (direct) and far-ear (cross) responses of a crossfeed at
+// w radians per sample: L' = D L + C R.
+void crossfeed_response(const CrossfeedCoefficients& c, double w, std::complex<double>& direct,
+                        std::complex<double>& cross) noexcept {
+    const std::complex<double> zinv = std::polar(1.0, -w);
+    if (!c.mid_side) {
+        const double g = c.gain;
+        direct = g * first_order_response({c.a0_hi, c.a1_hi, c.b1_hi}, zinv);
+        cross = g * first_order_response({c.a0_lo, 0.0F, c.b1_lo}, zinv);
+        return;
+    }
+    std::complex<double> side = first_order_response(c.near, zinv) -
+                                first_order_response(c.far, zinv) * std::polar(1.0, -w * c.far_delay);
+    if (c.reflection_count != 0U) {
+        std::complex<double> sum = 0.0;
+        for (std::size_t i = 0U; i < c.reflection_count; ++i)
+            sum += static_cast<double>(c.reflections[i].gain) * std::polar(1.0, -w * c.reflections[i].delay);
+        side += sum * first_order_response(c.reflection_highpass, zinv) *
+                first_order_response(c.reflection_lowpass, zinv);
+    }
+    if (c.post_enabled) {
+        const auto& b = c.post;
+        side *= (static_cast<double>(b.b0) + static_cast<double>(b.b1) * zinv + static_cast<double>(b.b2) * zinv * zinv) /
+                (1.0 + static_cast<double>(b.a1) * zinv + static_cast<double>(b.a2) * zinv * zinv);
+    }
+    direct = 0.5 * (1.0 + side);
+    cross = 0.5 * (1.0 - side);
+}
+
 CrossfeedCoefficients design_crossfeed(std::uint8_t preset, std::uint32_t rate) noexcept {
     CrossfeedCoefficients c{};
-    if (preset == 0U || preset >= settings::crossfeed_count) return c;
+    if (preset == 0U || preset >= settings::crossfeed_count || rate == 0U) return c;
+    c.preset = preset;
+    using settings::Crossfeed;
+    switch (static_cast<Crossfeed>(preset)) {
+    case Crossfeed::Natural: c.enabled = c.mid_side = true; design_natural(c, rate); return c;
+    case Crossfeed::Speakers30: c.enabled = c.mid_side = true; design_speakers(c, 30.0, rate); return c;
+    case Crossfeed::Speakers45: c.enabled = c.mid_side = true; design_speakers(c, 45.0, rate); return c;
+    default: break;
+    }
+    // Bauer stereophonic-to-binaural (bs2b) first-order crossfeed.
     const double fc_lo = crossfeed_presets[preset].cutoff_hz;
     const double feed = crossfeed_presets[preset].feed_db;
     const double gb_lo = feed * -5.0 / 6.0 - 3.0;
@@ -35,13 +159,6 @@ CrossfeedCoefficients design_crossfeed(std::uint8_t preset, std::uint32_t rate) 
     c.b1_hi = static_cast<float>(x_hi);
     c.gain = static_cast<float>(1.0 / (1.0 - g_hi + g_lo));
     return c;
-}
-
-// |(n0 + n1 z^-1) / (1 - d1 z^-1)| on the unit circle.
-float first_order_magnitude(float n0, float n1, float d1, float cos_w) noexcept {
-    const float num = n0 * n0 + n1 * n1 + 2.0F * n0 * n1 * cos_w;
-    const float den = 1.0F + d1 * d1 - 2.0F * d1 * cos_w;
-    return std::sqrt(num / den);
 }
 
 // BS.1770-4 K-weighting for any sample rate (the two analog prototypes,
@@ -112,15 +229,15 @@ float chain_magnitude(const SourceDspDesign& d, bool left, float w) noexcept {
 
 float worst_case_magnitude(const SourceDspDesign& d, float frequency_hz) noexcept {
     const float w = 2.0F * static_cast<float>(pi) * frequency_hz / static_cast<float>(d.sample_rate_hz);
-    const float cos_w = std::cos(w);
     const float eq_left = chain_magnitude(d, true, w);
     const float eq_right = chain_magnitude(d, false, w);
     float out_left = eq_left;
     float out_right = eq_right;
     if (d.crossfeed.enabled) {
-        const auto& c = d.crossfeed;
-        const float hi = first_order_magnitude(c.a0_hi, c.a1_hi, c.b1_hi, cos_w) * c.gain;
-        const float lo = first_order_magnitude(c.a0_lo, 0.0F, c.b1_lo, cos_w) * c.gain;
+        std::complex<double> direct, cross;
+        crossfeed_response(d.crossfeed, static_cast<double>(w), direct, cross);
+        const auto hi = static_cast<float>(std::abs(direct));
+        const auto lo = static_cast<float>(std::abs(cross));
         // Upper bound: both paths in phase with fully correlated channels.
         out_left = hi * eq_left + lo * eq_right;
         out_right = hi * eq_right + lo * eq_left;
@@ -367,8 +484,9 @@ void SourceDsp::snap() noexcept {
     trim_right_ = trim_right_from_ = trim_right_to_ = design_.trim_right * design_.makeup;
     xf_ = design_.crossfeed;
     xf_active_ = xf_.enabled;
+    xf_pending_ = false;
     xf_wet_ = xf_wet_from_ = xf_wet_to_ = xf_.enabled ? 1.0F : 0.0F;
-    lo_left_ = lo_right_ = hi_left_ = hi_right_ = in_left_ = in_right_ = 0.0F;
+    clear_crossfeed_state();
     ramp_steps_total_ = ramp_steps_left_ = ramp_phase_ = 0U;
     adopt_leveler(design_.leveler, true);
     update_idle();
@@ -408,19 +526,27 @@ void SourceDsp::set_design(const SourceDspDesign& design) noexcept {
     trim_left_to_ = design.trim_left * design.makeup;
     trim_right_to_ = design.trim_right * design.makeup;
 
-    // Crossfeed glides by its wet amount. New coefficients take over at
+    // Crossfeed glides by its wet amount. New bs2b coefficients take over at
     // once when it stays on (its one-pole states carry over smoothly); when
-    // it turns off, the old ones keep running until the fade-out ends.
-    if (design.crossfeed.enabled) {
+    // it turns off, the old ones keep running until the fade-out ends. A
+    // change to or from a mid/side preset (other delays, other structure)
+    // fades the old preset out, then advance_ramp() fades the new one in.
+    const auto& xf = design.crossfeed;
+    xf_pending_ = false;
+    if (xf.enabled) {
         if (!xf_active_) {
-            lo_left_ = lo_right_ = hi_left_ = hi_right_ = in_left_ = in_right_ = 0.0F;
+            xf_ = xf;
+            xf_active_ = true;
             xf_wet_ = 0.0F;
+            clear_crossfeed_state();
+        } else if ((xf_.mid_side || xf.mid_side) && xf_.preset != xf.preset) {
+            xf_pending_ = true;
+        } else {
+            xf_ = xf;
         }
-        xf_ = design.crossfeed;
-        xf_active_ = true;
     }
     xf_wet_from_ = xf_wet_;
-    xf_wet_to_ = design.crossfeed.enabled ? 1.0F : 0.0F;
+    xf_wet_to_ = xf.enabled && !xf_pending_ ? 1.0F : 0.0F;
     adopt_leveler(design.leveler, false);
 
     const float steps = ramp_seconds * static_cast<float>(design.sample_rate_hz) /
@@ -467,10 +593,39 @@ void SourceDsp::advance_ramp() noexcept {
     if (!design_.crossfeed.enabled) {
         xf_active_ = false;
         xf_ = {};
-        lo_left_ = lo_right_ = hi_left_ = hi_right_ = in_left_ = in_right_ = 0.0F;
+        clear_crossfeed_state();
+    } else if (xf_pending_) {
+        // The old preset has faded out: start the new one from rest and
+        // fade it in. Everything else has landed and holds still.
+        xf_pending_ = false;
+        xf_ = design_.crossfeed;
+        clear_crossfeed_state();
+        for (std::size_t i = 0U; i < dsp_band_count; ++i) {
+            left_[i].from = left_[i].to;
+            right_[i].from = right_[i].to;
+        }
+        trim_left_from_ = trim_left_to_;
+        trim_right_from_ = trim_right_to_;
+        xf_wet_ = xf_wet_from_ = 0.0F;
+        xf_wet_to_ = 1.0F;
+        ramp_steps_left_ = ramp_steps_total_;
+        return;
     }
     xf_wet_ = xf_wet_to_;
     update_idle();
+}
+
+void SourceDsp::clear_crossfeed_state() noexcept {
+    lo_left_ = lo_right_ = hi_left_ = hi_right_ = in_left_ = in_right_ = 0.0F;
+    line_.fill(0.0F);
+    line_pos_ = 0U;
+    near_x1_ = near_y1_ = far_x1_ = far_y1_ = 0.0F;
+    refl_hp_x1_ = refl_hp_y1_ = refl_lp_x1_ = refl_lp_y1_ = 0.0F;
+    xf_post_ = {};
+    if (xf_.post_enabled) {
+        xf_post_.p = xf_post_.from = xf_post_.to = xf_.post_svf;
+        update_coefficients(xf_post_);
+    }
 }
 
 void SourceDsp::update_idle() noexcept {

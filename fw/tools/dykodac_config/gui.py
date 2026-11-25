@@ -389,8 +389,14 @@ class MainWindow(QMainWindow):
         gf.addRow("Polarity", pol)
         self.c_xf = QComboBox()
         self.c_xf.addItems(p.CROSSFEED_NAMES)
-        self.c_xf.setToolTip("Headphone crossfeed (Bauer bs2b): blends a low-passed, delayed copy of each\n"
-                             "channel into the other, so hard-panned recordings sound less fatiguing.")
+        self.c_xf.setToolTip(
+            "Headphone crossfeed.\n"
+            "bs2b presets (Bauer): blend a low-passed copy of each channel into the other;\n"
+            "  the centre loses ~1-2 dB of treble. Jan Meier is the mildest, default the strongest.\n"
+            "Natural: the centre passes untouched; only stereo differences lose their bass,\n"
+            "  with a ~0.45 ms interaural delay (~0.4 dB headroom).\n"
+            "Virtual speakers: spherical-head model of a speaker pair at ±30° / ±45° with early\n"
+            "  reflections, applied to stereo differences only, so the centre stays flat (~1.6-1.9 dB headroom).")
         gf.addRow("Crossfeed", self.c_xf)
         lv.addWidget(g)
 

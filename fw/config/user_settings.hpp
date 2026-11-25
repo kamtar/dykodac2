@@ -32,8 +32,13 @@ enum class Crossfeed : std::uint8_t {
     Bs2bDefault = 1U, // 700 Hz, 4.5 dB
     ChuMoy = 2U,      // 700 Hz, 6.0 dB
     JanMeier = 3U,    // 650 Hz, 9.5 dB
+    // Mid/side forms: the centre (L = R) passes untouched, only the side
+    // signal is shaped (audio/source_dsp.cpp).
+    Natural = 4U,     // side bass cut, ~0.45 ms interaural delay
+    Speakers30 = 5U,  // spherical-head virtual speakers at +-30 deg
+    Speakers45 = 6U,  // the same at +-45 deg
 };
-inline constexpr std::uint8_t crossfeed_count = 4U;
+inline constexpr std::uint8_t crossfeed_count = 7U;
 // Automatic loudness leveler: off or its speed (attack / release).
 enum class Leveler : std::uint8_t { Off = 0U, Slow = 1U, Medium = 2U, Fast = 3U };
 inline constexpr std::uint8_t leveler_mode_count = 4U;

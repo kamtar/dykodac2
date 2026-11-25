@@ -3,6 +3,7 @@ worst-case boost the firmware subtracts from the headroom."""
 
 from __future__ import annotations
 
+import cmath
 import math
 
 from . import protocol as p
@@ -49,21 +50,77 @@ def magnitude(c, w: float) -> float:
     return math.sqrt(max(num, 0.0) / den) if den > 0 else 0.0
 
 
-def _first_order(n0, n1, d1, w):
-    c = math.cos(w)
-    return math.sqrt((n0 * n0 + n1 * n1 + 2 * n0 * n1 * c) / (1 + d1 * d1 - 2 * d1 * c))
+def _fo(b0, b1, d1, zi):
+    """First-order section (b0 + b1 z^-1) / (1 - d1 z^-1) at z^-1 = zi."""
+    return (b0 + b1 * zi) / (1 - d1 * zi)
+
+
+def _frames(seconds, fs):
+    return int(seconds * fs + 0.5)
+
+
+def _natural(fs):
+    x = math.exp(-2 * math.pi * 500.0 / fs)
+    post = design_band(p.EqBand(type=p.FILTER_PEAKING, channels=p.CH_BOTH, frequency_hz=1200.0, gain_db=-2.0, q=0.5), fs)
+    return dict(near=(1.0, 0.0, 0.0), far=(0.5 * (1 - x), 0.0, x), far_delay=_frames(0.10e-3, fs),
+                refl=[], post=post)
+
+
+_REFLECTIONS = [(1.30, 0.20, 1.55, 0.15), (2.90, 0.16, 3.20, 0.10), (3.70, 0.09, 3.95, 0.13),
+                (4.80, 0.12, 5.00, 0.11), (6.90, 0.08, 7.30, 0.07), (8.60, 0.07, 8.85, 0.07)]
+
+
+def _speakers(az_deg, fs):
+    radius, sound = 0.0875, 343.0
+    az = math.radians(az_deg)
+    kt = 2 * fs * radius / (2 * sound)
+
+    def shadow(from_ear):
+        alpha = 1.05 + 0.95 * math.cos(from_ear / 150 * math.pi)
+        return (0.5 * (1 + alpha * kt) / (1 + kt), 0.5 * (1 - alpha * kt) / (1 + kt), -(1 - kt) / (1 + kt))
+
+    level = 0.35 * 0.5
+    refl = []
+    for nm, ng, fm, fg in _REFLECTIONS:
+        refl += [(_frames(nm * 1e-3, fs), level * ng), (_frames(fm * 1e-3, fs), -level * fg)]
+    xh, xl = math.exp(-2 * math.pi * 500.0 / fs), math.exp(-2 * math.pi * 6000.0 / fs)
+    return dict(near=shadow(90 - az_deg), far=shadow(90 + az_deg),
+                far_delay=_frames(radius / sound * (az + math.sin(az)), fs), refl=refl,
+                hp=(0.5 * (1 + xh), -0.5 * (1 + xh), xh), lp=(1 - xl, 0.0, xl), post=None)
 
 
 def _crossfeed(preset: int, fs: float):
-    if not 0 < preset < len(_XF_PRESETS):
+    """Mirror of design_crossfeed(); returns a function w -> (direct, cross) complex."""
+    if preset == 4:
+        c = _natural(fs)
+    elif preset in (5, 6):
+        c = _speakers(30.0 if preset == 5 else 45.0, fs)
+    elif 0 < preset < len(_XF_PRESETS):
+        fc_lo, feed = _XF_PRESETS[preset]
+        gb_lo, gb_hi = feed * -5 / 6 - 3, feed / 6 - 3
+        g_lo, g_hi = 10 ** (gb_lo / 20), 1 - 10 ** (gb_hi / 20)
+        fc_hi = fc_lo * 2 ** ((gb_lo - 20 * math.log10(g_hi)) / 12)
+        x_lo, x_hi = math.exp(-2 * math.pi * fc_lo / fs), math.exp(-2 * math.pi * fc_hi / fs)
+        gain = 1 / (1 - g_hi + g_lo)
+
+        def bs2b(w):
+            zi = cmath.exp(-1j * w)
+            return (gain * _fo(1 - g_hi * (1 - x_hi), -x_hi, x_hi, zi), gain * _fo(g_lo * (1 - x_lo), 0.0, x_lo, zi))
+        return bs2b
+    else:
         return None
-    fc_lo, feed = _XF_PRESETS[preset]
-    gb_lo, gb_hi = feed * -5 / 6 - 3, feed / 6 - 3
-    g_lo, g_hi = 10 ** (gb_lo / 20), 1 - 10 ** (gb_hi / 20)
-    fc_hi = fc_lo * 2 ** ((gb_lo - 20 * math.log10(g_hi)) / 12)
-    x_lo, x_hi = math.exp(-2 * math.pi * fc_lo / fs), math.exp(-2 * math.pi * fc_hi / fs)
-    return dict(a0_lo=g_lo * (1 - x_lo), b1_lo=x_lo, a0_hi=1 - g_hi * (1 - x_hi), a1_hi=-x_hi, b1_hi=x_hi,
-                gain=1 / (1 - g_hi + g_lo))
+
+    def mid_side(w):
+        zi = cmath.exp(-1j * w)
+        side = _fo(*c["near"], zi) - _fo(*c["far"], zi) * cmath.exp(-1j * w * c["far_delay"])
+        if c["refl"]:
+            s = sum(g * cmath.exp(-1j * w * n) for n, g in c["refl"])
+            side += s * _fo(*c["hp"], zi) * _fo(*c["lp"], zi)
+        if c["post"]:
+            b0, b1, b2, a1, a2 = c["post"]
+            side *= (b0 + b1 * zi + b2 * zi * zi) / (1 + a1 * zi + a2 * zi * zi)
+        return 0.5 * (1 + side), 0.5 * (1 - side)
+    return mid_side
 
 
 class Chain:
@@ -102,9 +159,8 @@ class Chain:
         er = 10 ** (self.eq_db(f, False) / 20)
         ol, orr = el, er
         if self.xf:
-            x = self.xf
-            hi = _first_order(x["a0_hi"], x["a1_hi"], x["b1_hi"], w) * x["gain"]
-            lo = _first_order(x["a0_lo"], 0.0, x["b1_lo"], w) * x["gain"]
+            direct, cross = self.xf(w)
+            hi, lo = abs(direct), abs(cross)
             ol, orr = hi * el + lo * er, hi * er + lo * el
         return max(ol * self.trim_l, orr * self.trim_r)
 

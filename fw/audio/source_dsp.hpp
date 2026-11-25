@@ -16,6 +16,11 @@
 // SVF stays near -140 dBFS (the RT1011 FPU is single precision only). The
 // Biquad form is kept for analysis (worst-case boost, configurator plots).
 //
+// Crossfeed follows the EQ: either bs2b, or a mid/side form (Natural,
+// virtual speakers) that passes the centre untouched and shapes only the
+// side signal through a short delay line (head-shadow filters, interaural
+// delay, early reflections).
+//
 // Two more SVF slots behind the EQ carry the loudness compensation (ISO 226
 // low and high shelf, set from the host volume). They are not part of the
 // boost compensation: their boost never exceeds the host attenuation below
@@ -57,14 +62,47 @@ struct SvfParams {
     float m2{0.0F};
 };
 
+// y = b0 x + b1 x[n-1] + d1 y[n-1].
+struct FirstOrder {
+    float b0{1.0F};
+    float b1{0.0F};
+    float d1{0.0F};
+};
+
+// Side-signal ring of the mid/side crossfeeds: power of two, longer than
+// the latest reflection (8.85 ms = 425 frames at 48 kHz).
+inline constexpr std::size_t crossfeed_line_frames = 512U;
+inline constexpr std::size_t crossfeed_max_reflections = 12U;
+
+struct CrossfeedReflection {
+    std::uint16_t delay{0U}; // frames
+    float gain{0.0F};        // signed: + near-ear, - far-ear arrival
+};
+
 struct CrossfeedCoefficients {
     bool enabled{false};
+    // false: bs2b (fields *_lo/*_hi/gain); true: mid/side shuffler.
+    bool mid_side{false};
+    std::uint8_t preset{0U};
     float a0_lo{0.0F};
     float b1_lo{0.0F};
     float a0_hi{1.0F};
     float a1_hi{0.0F};
     float b1_hi{0.0F};
     float gain{1.0F};
+    // Mid/side: L = M + S', R = M - S' with M = (L + R) / 2, S = (L - R) / 2
+    // and S' = post(near(S) - far(S[n - far_delay]) + band(sum of
+    // reflections of S)). The centre is untouched by construction.
+    FirstOrder near{};
+    FirstOrder far{};
+    std::uint16_t far_delay{0U};
+    std::uint8_t reflection_count{0U};
+    std::array<CrossfeedReflection, crossfeed_max_reflections> reflections{};
+    FirstOrder reflection_highpass{};
+    FirstOrder reflection_lowpass{};
+    bool post_enabled{false};
+    Biquad post{};         // analysis form
+    SvfParams post_svf{};  // runtime form
 };
 
 // Slots behind the user EQ bands for loudness compensation.
@@ -173,7 +211,12 @@ public:
             if ((live_left_mask_ & bit) != 0U) l = run(left_[i], l);
             if ((live_right_mask_ & bit) != 0U) r = run(right_[i], r);
         }
-        if (xf_active_) {
+        if (xf_active_ && xf_.mid_side) {
+            const float m = 0.5F * (l + r);
+            const float s = shuffle(0.5F * (l - r));
+            l += (m + s - l) * xf_wet_;
+            r += (m - s - r) * xf_wet_;
+        } else if (xf_active_) {
             const auto& c = xf_;
             lo_left_ = c.a0_lo * l + c.b1_lo * lo_left_;
             lo_right_ = c.a0_lo * r + c.b1_lo * lo_right_;
@@ -233,6 +276,31 @@ private:
         s2 = c.b2 * x - c.a2 * y;
         return y;
     }
+    static inline float first_order(const FirstOrder& c, float x, float& x1, float& y1) noexcept {
+        const float y = c.b0 * x + c.b1 * x1 + c.d1 * y1;
+        x1 = x;
+        y1 = y;
+        return y;
+    }
+    // Side signal of the mid/side crossfeeds (see CrossfeedCoefficients).
+    inline float shuffle(float s) noexcept {
+        constexpr std::size_t mask = crossfeed_line_frames - 1U;
+        const auto& c = xf_;
+        line_[line_pos_] = s;
+        float out = first_order(c.near, s, near_x1_, near_y1_) -
+                    first_order(c.far, line_[(line_pos_ - c.far_delay) & mask], far_x1_, far_y1_);
+        if (c.reflection_count != 0U) {
+            float sum = 0.0F;
+            for (std::size_t i = 0U; i < c.reflection_count; ++i)
+                sum += c.reflections[i].gain * line_[(line_pos_ - c.reflections[i].delay) & mask];
+            sum = first_order(c.reflection_highpass, sum, refl_hp_x1_, refl_hp_y1_);
+            out += first_order(c.reflection_lowpass, sum, refl_lp_x1_, refl_lp_y1_);
+        }
+        if (c.post_enabled) out = run(xf_post_, out);
+        line_pos_ = (line_pos_ + 1U) & mask;
+        return out;
+    }
+    void clear_crossfeed_state() noexcept;
     inline void meter(float l, float r) noexcept {
         const float kl = biquad(lev_.k_highpass, biquad(lev_.k_shelf, l, k_state_[0], k_state_[1]),
                                 k_state_[2], k_state_[3]);
@@ -276,6 +344,20 @@ private:
     float hi_right_{0.0F};
     float in_left_{0.0F};
     float in_right_{0.0F};
+    // Mid/side crossfeed state. A change of mid/side preset while on fades
+    // the old one out first, then the new one in from cleared state.
+    bool xf_pending_{false};
+    std::array<float, crossfeed_line_frames> line_{};
+    std::size_t line_pos_{0U};
+    float near_x1_{0.0F};
+    float near_y1_{0.0F};
+    float far_x1_{0.0F};
+    float far_y1_{0.0F};
+    float refl_hp_x1_{0.0F};
+    float refl_hp_y1_{0.0F};
+    float refl_lp_x1_{0.0F};
+    float refl_lp_y1_{0.0F};
+    Band xf_post_{};
     // Leveler. The loudness estimate and gain survive stream restarts and
     // redesigns; only the meter filters restart.
     LevelerDesign lev_{};
