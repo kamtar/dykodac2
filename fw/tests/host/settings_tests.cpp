@@ -207,13 +207,14 @@ void run_settings_tests() {
         settings::Settings bad = d;
         bad.crossfeed = settings::crossfeed_count;
         expect(settings::validate(bad) == settings::Invalid::Crossfeed, "unknown crossfeed rejected");
-        struct Case { Crossfeed mode; double itd_min_ms; double itd_max_ms; double ild_lo_db; double ild_hi_db; };
+        struct Case { Crossfeed mode; double itd_min_ms; double itd_max_ms; double ild_lo_db; double ild_hi_db; float max_boost_db; };
         // 100 Hz far/near ear for a hard-left source. Speakers: Brown-Duda
         // low-frequency ITD (Woodworth delay + head-shadow group delay).
         const Case cases[] = {
-            {Crossfeed::Natural, 0.40, 0.50, -11.0, -9.0},
-            {Crossfeed::Speakers30, 0.37, 0.44, -1.5, 0.0},
-            {Crossfeed::Speakers45, 0.51, 0.60, -1.5, 0.0},
+            {Crossfeed::Natural, 0.40, 0.50, -11.0, -9.0, 0.8F},
+            {Crossfeed::Speakers30, 0.37, 0.44, -1.5, 0.0, 2.0F},
+            {Crossfeed::Speakers45, 0.51, 0.60, -1.5, 0.0, 2.2F},
+            {Crossfeed::Spacious, 0.40, 0.60, -19.0, -16.0, 3.8F}, // nominal amount; boost covers 0.5-1.4
         };
         for (const std::uint32_t fs : {44'100U, 48'000U}) {
             for (const auto& c : cases) {
@@ -223,7 +224,7 @@ void run_settings_tests() {
                 const auto design = audio::design_source_dsp(s, fs);
                 expect(design.crossfeed.enabled && design.crossfeed.mid_side && !design.identity,
                        "mid/side crossfeed designs as mid/side");
-                expect(design.boost_db > 0.0F && design.boost_db < 2.5F, "mid/side crossfeed headroom cost stays small");
+                expect(design.boost_db > 0.0F && design.boost_db < c.max_boost_db, "mid/side crossfeed headroom cost as designed");
                 audio::SourceDsp dsp;
                 dsp.set_design(design);
                 // The centre passes bit-exactly (only the makeup gain).
@@ -262,6 +263,62 @@ void run_settings_tests() {
         }
     }
 
+    // ---- Spacious: the amount follows the programme's correlation ---------
+    {
+        constexpr std::uint32_t fs = 48'000U;
+        settings::Settings s = d;
+        s.crossfeed = static_cast<std::uint8_t>(settings::Crossfeed::Spacious);
+        const auto design = audio::design_source_dsp(s, fs);
+        expect(design.crossfeed.adaptive, "Spacious adapts");
+        std::uint32_t seed = 12345U;
+        auto noise = [&seed]() { // uniform -1..1
+            seed = seed * 1'664'525U + 1'013'904'223U;
+            return static_cast<double>(seed >> 8U) / 8'388'608.0 - 1.0;
+        };
+        // Decaying bursts: a burst every period, 150 ms decay.
+        auto burst = [](int i, double period, double phase) {
+            const double t = std::fmod(static_cast<double>(i) / fs + phase, period);
+            return std::exp(-t / 0.150);
+        };
+        constexpr double amp = 2.0e6; // the chain runs in 24-bit integer scale
+        auto settle = [&](auto&& source) {
+            audio::SourceDsp dsp;
+            dsp.set_design(design);
+            for (int i = 0; i < 10 * static_cast<int>(fs); ++i) {
+                float l, r;
+                source(i, l, r);
+                dsp.process(l, r);
+            }
+            return dsp;
+        };
+        // Reverb-like: independent noise in L and R, one shared envelope.
+        const auto diffuse = settle([&](int i, float& l, float& r) {
+            const double e = amp * burst(i, 0.5, 0.0);
+            l = static_cast<float>(e * noise());
+            r = static_cast<float>(e * noise());
+        });
+        // Hard-panned independent sources: their own noise and envelope.
+        const auto panned = settle([&](int i, float& l, float& r) {
+            l = static_cast<float>(amp * burst(i, 0.37, 0.0) * noise());
+            r = static_cast<float>(amp * burst(i, 0.53, 0.2) * noise());
+        });
+        // Mostly correlated: one source panned a little left plus a trace.
+        const auto correlated = settle([&](int i, float& l, float& r) {
+            const double x = amp * burst(i, 0.45, 0.0) * noise();
+            l = static_cast<float>(x + 0.1 * amp * noise());
+            r = static_cast<float>(0.6 * x);
+        });
+        std::cout << "  Spacious amount: diffuse " << diffuse.crossfeed_amount() << " (rho wave "
+                  << diffuse.waveform_correlation() << ", env " << diffuse.envelope_correlation() << "), panned "
+                  << panned.crossfeed_amount() << " (" << panned.waveform_correlation() << ", "
+                  << panned.envelope_correlation() << "), correlated " << correlated.crossfeed_amount() << " ("
+                  << correlated.waveform_correlation() << ", " << correlated.envelope_correlation() << ")\n";
+        expect(diffuse.crossfeed_amount() < 0.7F, "diffuse sound gets less crossfeed (reverb kept)");
+        expect(panned.crossfeed_amount() > 1.2F, "independent hard-panned sources get more crossfeed");
+        expect(correlated.crossfeed_amount() > 0.9F && correlated.crossfeed_amount() < 1.1F,
+               "correlated material gets the nominal amount");
+            }
+
     // ---- switching between crossfeed presets glides without clicks --------
     {
         constexpr double fs = 48'000.0;
@@ -287,11 +344,12 @@ void run_settings_tests() {
             return audio::design_source_dsp(s, 48'000U);
         };
         const Crossfeed sequence[] = {Crossfeed::Natural, Crossfeed::Speakers30, Crossfeed::Speakers45,
-                                      Crossfeed::Bs2bDefault, Crossfeed::Natural, Crossfeed::Off};
+                                      Crossfeed::Spacious, Crossfeed::Bs2bDefault, Crossfeed::Natural,
+                                      Crossfeed::Off};
         // Steady step size of every preset and of the dry signal.
         float steady = 0.0F;
         for (const auto mode : {Crossfeed::Off, Crossfeed::Natural, Crossfeed::Speakers30, Crossfeed::Speakers45,
-                                Crossfeed::Bs2bDefault}) {
+                                Crossfeed::Spacious, Crossfeed::Bs2bDefault}) {
             audio::SourceDsp ref;
             ref.set_design(design_for(mode));
             float ref_last = 0.0F;

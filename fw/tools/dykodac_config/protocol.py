@@ -57,7 +57,8 @@ FILTER_NAMES = ["Off", "Peak", "Low shelf", "High shelf", "Low pass", "High pass
 CH_LEFT, CH_RIGHT, CH_BOTH = 1, 2, 3
 LEVELER_NAMES = ["Off", "Slow (4 s / 30 s)", "Medium (1.5 s / 10 s)", "Fast (0.5 s / 3 s)"]
 CROSSFEED_NAMES = ["Off", "bs2b default (700 Hz, 4.5 dB)", "Chu Moy (700 Hz, 6 dB)", "Jan Meier (650 Hz, 9.5 dB)",
-                   "Natural (flat centre)", "Virtual speakers ±30°", "Virtual speakers ±45°"]
+                   "Natural (flat centre)", "Virtual speakers ±30°", "Virtual speakers ±45°",
+                   "Spacious (keeps reverb)"]
 
 # Device limits (config/user_settings.hpp).
 MIN_HEADROOM_DB = -24.0

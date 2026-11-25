@@ -37,7 +37,7 @@ itself.
 | DAC ceiling | 0 to -40 dB, 0.5 dB steps | -9 dB | CS4398 attenuation; the analog safety limit. |
 | Balance | ±12 dB | 0 | Attenuates one side only. |
 | Polarity | per channel | off | |
-| Crossfeed | off, bs2b default, Chu Moy, Jan Meier, Natural, Virtual speakers ±30° / ±45° | off | bs2b first-order crossfeed, or a mid/side crossfeed that leaves the centre untouched (see below). |
+| Crossfeed | off, bs2b default, Chu Moy, Jan Meier, Natural, Virtual speakers ±30° / ±45°, Spacious | off | bs2b first-order crossfeed, or a mid/side crossfeed that leaves the centre untouched (see below). |
 | Leveler | off, slow, medium, fast; target -36 to -6 LUFS; max cut 1 to 30 dB | off, -18 LUFS, 12 dB | Cut-only automatic level (see below). |
 | Loudness compensation | on/off; reference 0 to -60 dB host volume; amount 10 to 100 %; max bass lift 1 to 20 dB | off, -10 dB, 70 %, 12 dB | ISO 226 bass/treble lift below the reference volume. |
 | Parametric EQ | 10 bands: peak, low/high shelf (Q form), low/high pass, notch; per-band L/R/both | off | ±20 dB, 10 Hz to 20 kHz, Q 0.1 to 20. |
@@ -64,6 +64,23 @@ only the side signal S is shaped.
   10 dB at 1 to 1.4 kHz into the phantom centre. Flattening that with an EQ
   would cost about 11 dB of headroom and boost every panned source by the same
   amount. Costs 1.6 to 1.9 dB of headroom.
+
+- *Spacious* (after the ideas in the dCS Expanse white paper, which gives no
+  filter values; this is our own design): ordinary crossfeed shrinks the side
+  signal, which carries most of a recording's reverberation, so the sense of
+  space collapses (Natural: side bass -6 dB). Here the cross path is full
+  range, a generic averaged head shadow (0.45 below ~1.5 kHz, falling to 0.18),
+  0.30 ms late at all frequencies. The side is widened by +2.5 dB below 300 Hz:
+  S' = widen(S - amount x shadow(S late)). At the nominal amount, the side
+  stays within ±2.7 dB (1/3 octave) at all frequencies. The comb of the delayed
+  copy stays in, as on loudspeakers, and nothing is added.
+  The amount follows the programme above 300 Hz, measured every 10 ms
+  and smoothed over about 1.5 s. It stays at 1 for correlated material. Diffuse sound
+  (decorrelated waveforms whose envelopes still move together: reverb, spaced
+  microphones) drops it to 0.5, so the space is kept. Independent hard-panned
+  sources (decorrelated waveforms and envelopes) raise it to 1.4. The amount
+  glides by sample and holds through silence. The headroom analysis covers the
+  whole 0.5-1.4 range (3.6 dB).
 
 Switching between a mid/side preset and any other crossfeed preset fades the
 old one out and the new one in (2 x 20 ms).

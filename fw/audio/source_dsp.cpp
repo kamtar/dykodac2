@@ -97,13 +97,57 @@ void design_speakers(CrossfeedCoefficients& c, double azimuth_deg, std::uint32_t
     c.post_enabled = false;
 }
 
+// "Spacious": crossfeed keeps the recording's own reverberation instead of
+// trading it for localisation. Reverb lives mostly in the side signal, and
+// an ordinary crossfeed shrinks it (Natural: -6 dB in the bass), so the
+// space collapses. Here the cross path is full range (a generic average
+// head shadow: 0.45 below ~1.5 kHz falling to 0.18), 0.30 ms late at all
+// frequencies, and the side is widened by a +2.5 dB shelf below 300 Hz:
+// S' = widen(S - shadow(S[n - d])). The side stays within +-2.7 dB
+// (1/3 octave) everywhere; the comb of the delayed copy is left in, as on
+// loudspeakers. No reflections are added. Hard-panned far ear at the
+// nominal amount: -17.6 dB at 100 Hz, -15 dB at 1 kHz, -20 dB at 8 kHz,
+// 0.4-0.5 ms late.
+//
+// The amount follows the L/R correlation of the programme above 300 Hz
+// (see SourceDsp::end_correlation_block()): correlated material gets the
+// nominal amount, diffuse sound (decorrelated waveforms whose envelopes
+// still move together: reverb, spaced microphones) down to 0.5 so its
+// space is kept, independent hard-panned sources (decorrelated waveforms
+// and envelopes) up to 1.4.
+void design_spacious(CrossfeedCoefficients& c, std::uint32_t rate) noexcept {
+    c.adaptive = true;
+    c.amount_min = 0.5F;
+    c.amount_max = 1.4F;
+    c.meter_highpass = one_pole_highpass(300.0, rate);
+    constexpr double block_seconds = 0.010;
+    c.meter_block = frames(block_seconds, rate);
+    c.meter_smooth = static_cast<float>(1.0 - std::exp(-block_seconds / 1.5));
+    c.amount_smooth = static_cast<float>(1.0 - std::exp(-block_seconds / 1.0));
+    // -70 dBFS per channel in the chain's 24-bit integer scale.
+    const double floor = 8'388'608.0 * std::pow(10.0, -70.0 / 20.0);
+    c.meter_gate = static_cast<float>(c.meter_block * floor * floor);
+    constexpr double low = 0.45, high = 0.18, corner_hz = 1'500.0;
+    const double k = std::tan(pi * corner_hz / rate);
+    c.near = {};
+    c.far = {static_cast<float>((low * k + high) / (k + 1.0)), static_cast<float>((low * k - high) / (k + 1.0)),
+             static_cast<float>(-(k - 1.0) / (k + 1.0))};
+    c.far_delay = frames(0.30e-3, rate);
+    c.reflection_count = 0U;
+    const settings::EqBand widen{static_cast<std::uint8_t>(settings::FilterType::LowShelf), settings::channel_both,
+                                 0U, 300.0F, 2.5F, 0.6F};
+    c.post_enabled = true;
+    c.post = design_band(widen, rate);
+    c.post_svf = design_band_svf(widen, rate);
+}
+
 std::complex<double> first_order_response(const FirstOrder& f, std::complex<double> zinv) noexcept {
     return (static_cast<double>(f.b0) + static_cast<double>(f.b1) * zinv) / (1.0 - static_cast<double>(f.d1) * zinv);
 }
 
 // Complex near-ear (direct) and far-ear (cross) responses of a crossfeed at
 // w radians per sample: L' = D L + C R.
-void crossfeed_response(const CrossfeedCoefficients& c, double w, std::complex<double>& direct,
+void crossfeed_response(const CrossfeedCoefficients& c, double w, double amount, std::complex<double>& direct,
                         std::complex<double>& cross) noexcept {
     const std::complex<double> zinv = std::polar(1.0, -w);
     if (!c.mid_side) {
@@ -113,7 +157,7 @@ void crossfeed_response(const CrossfeedCoefficients& c, double w, std::complex<d
         return;
     }
     std::complex<double> side = first_order_response(c.near, zinv) -
-                                first_order_response(c.far, zinv) * std::polar(1.0, -w * c.far_delay);
+                                amount * first_order_response(c.far, zinv) * std::polar(1.0, -w * c.far_delay);
     if (c.reflection_count != 0U) {
         std::complex<double> sum = 0.0;
         for (std::size_t i = 0U; i < c.reflection_count; ++i)
@@ -139,6 +183,7 @@ CrossfeedCoefficients design_crossfeed(std::uint8_t preset, std::uint32_t rate) 
     case Crossfeed::Natural: c.enabled = c.mid_side = true; design_natural(c, rate); return c;
     case Crossfeed::Speakers30: c.enabled = c.mid_side = true; design_speakers(c, 30.0, rate); return c;
     case Crossfeed::Speakers45: c.enabled = c.mid_side = true; design_speakers(c, 45.0, rate); return c;
+    case Crossfeed::Spacious: c.enabled = c.mid_side = true; design_spacious(c, rate); return c;
     default: break;
     }
     // Bauer stereophonic-to-binaural (bs2b) first-order crossfeed.
@@ -234,13 +279,19 @@ float worst_case_magnitude(const SourceDspDesign& d, float frequency_hz) noexcep
     float out_left = eq_left;
     float out_right = eq_right;
     if (d.crossfeed.enabled) {
-        std::complex<double> direct, cross;
-        crossfeed_response(d.crossfeed, static_cast<double>(w), direct, cross);
-        const auto hi = static_cast<float>(std::abs(direct));
-        const auto lo = static_cast<float>(std::abs(cross));
         // Upper bound: both paths in phase with fully correlated channels.
-        out_left = hi * eq_left + lo * eq_right;
-        out_right = hi * eq_right + lo * eq_left;
+        // An adaptive amount moves the side response along a line, and
+        // |D| + |C| is convex along it: the ends of the range bound it.
+        const auto& c = d.crossfeed;
+        out_left = out_right = 0.0F;
+        for (const float amount : {c.amount_min, c.amount_max}) {
+            std::complex<double> direct, cross;
+            crossfeed_response(c, static_cast<double>(w), amount, direct, cross);
+            const auto hi = static_cast<float>(std::abs(direct));
+            const auto lo = static_cast<float>(std::abs(cross));
+            out_left = std::fmax(out_left, hi * eq_left + lo * eq_right);
+            out_right = std::fmax(out_right, hi * eq_right + lo * eq_left);
+        }
     }
     out_left *= std::fabs(d.trim_left);
     out_right *= std::fabs(d.trim_right);
@@ -626,6 +677,66 @@ void SourceDsp::clear_crossfeed_state() noexcept {
         xf_post_.p = xf_post_.from = xf_post_.to = xf_.post_svf;
         update_coefficients(xf_post_);
     }
+    xf_amount_ = 1.0F;
+    xf_amount_step_ = 0.0F;
+    cm_x1_[0] = cm_x1_[1] = cm_y1_[0] = cm_y1_[1] = 0.0F;
+    cm_ll_ = cm_rr_ = cm_lr_ = 0.0F;
+    cm_fill_ = 0U;
+    for (auto& v : cm_wave_) v = 0.0F;
+    for (auto& v : cm_mean_) v = 0.0F;
+    for (auto& v : cm_env_) v = 0.0F;
+    cm_primed_ = false;
+    waveform_correlation_ = 1.0F;
+    envelope_correlation_ = 0.5F;
+}
+
+// Spacious crossfeed detector, every 10 ms. Waveform correlation (from
+// the block cross products) separates correlated from decorrelated
+// material; for the decorrelated part, the correlation of the two 10 ms
+// envelopes separates diffuse sound (reverb decays in both channels at
+// once) from independent sources panned hard left and right.
+void SourceDsp::end_correlation_block() noexcept {
+    const float ll = cm_ll_, rr = cm_rr_, lr = cm_lr_;
+    cm_ll_ = cm_rr_ = cm_lr_ = 0.0F;
+    cm_fill_ = 0U;
+    if (ll + rr < xf_.meter_gate) {
+        xf_amount_step_ = 0.0F; // silence and gaps: hold
+        return;
+    }
+    const float a = xf_.meter_smooth;
+    const float env_l = std::sqrt(ll);
+    const float env_r = std::sqrt(rr);
+    if (!cm_primed_) {
+        cm_wave_[0] = ll; cm_wave_[1] = rr; cm_wave_[2] = lr;
+        cm_mean_[0] = env_l; cm_mean_[1] = env_r;
+        cm_primed_ = true;
+    } else {
+        cm_wave_[0] += (ll - cm_wave_[0]) * a;
+        cm_wave_[1] += (rr - cm_wave_[1]) * a;
+        cm_wave_[2] += (lr - cm_wave_[2]) * a;
+        const float dl = env_l - cm_mean_[0];
+        const float dr = env_r - cm_mean_[1];
+        cm_mean_[0] += dl * a;
+        cm_mean_[1] += dr * a;
+        cm_env_[0] += (dl * dl - cm_env_[0]) * a;
+        cm_env_[1] += (dr * dr - cm_env_[1]) * a;
+        cm_env_[2] += (dl * dr - cm_env_[2]) * a;
+    }
+    const float wave_norm = std::sqrt(cm_wave_[0] * cm_wave_[1]);
+    const float rho_wave = wave_norm > 0.0F ? cm_wave_[2] / wave_norm : 1.0F;
+    // Steady envelopes carry no evidence either way: the regularisation
+    // pulls them to the neutral 0.5.
+    const float eps = 0.01F * cm_mean_[0] * cm_mean_[1];
+    float rho_env = (cm_env_[2] + 0.5F * eps) / (std::sqrt(cm_env_[0] * cm_env_[1]) + eps);
+    rho_env = rho_env < 0.0F ? 0.0F : (rho_env > 1.0F ? 1.0F : rho_env);
+    waveform_correlation_ = rho_wave;
+    envelope_correlation_ = rho_env;
+    const float decorrelated = 1.0F - (rho_wave > 0.0F ? rho_wave : 0.0F);
+    float target = 1.0F + decorrelated * (0.4F * (1.0F - rho_env) - 0.5F * rho_env);
+    target = target < xf_.amount_min ? xf_.amount_min : (target > xf_.amount_max ? xf_.amount_max : target);
+    // Glide there over the next block, one small step per frame.
+    const float next = xf_amount_ + (target - xf_amount_) * xf_.amount_smooth;
+    xf_amount_step_ = (next - xf_amount_) / static_cast<float>(xf_.meter_block);
 }
 
 void SourceDsp::update_idle() noexcept {

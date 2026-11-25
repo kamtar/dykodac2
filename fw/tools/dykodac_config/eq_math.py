@@ -89,9 +89,19 @@ def _speakers(az_deg, fs):
                 hp=(0.5 * (1 + xh), -0.5 * (1 + xh), xh), lp=(1 - xl, 0.0, xl), post=None)
 
 
+def _spacious(fs):
+    low, high, k = 0.45, 0.18, math.tan(math.pi * 1500.0 / fs)
+    widen = design_band(p.EqBand(type=p.FILTER_LOW_SHELF, channels=p.CH_BOTH, frequency_hz=300.0, gain_db=2.5, q=0.6), fs)
+    return dict(near=(1.0, 0.0, 0.0), far=((low * k + high) / (k + 1), (low * k - high) / (k + 1), -(k - 1) / (k + 1)),
+                far_delay=_frames(0.30e-3, fs), refl=[], post=widen, amounts=(0.5, 1.4))
+
+
 def _crossfeed(preset: int, fs: float):
-    """Mirror of design_crossfeed(); returns a function w -> (direct, cross) complex."""
-    if preset == 4:
+    """Mirror of design_crossfeed(); returns a function w -> [(direct, cross), ...] complex,
+    one pair per end of the adaptive amount range (one pair for fixed presets)."""
+    if preset == 7:
+        c = _spacious(fs)
+    elif preset == 4:
         c = _natural(fs)
     elif preset in (5, 6):
         c = _speakers(30.0 if preset == 5 else 45.0, fs)
@@ -105,14 +115,17 @@ def _crossfeed(preset: int, fs: float):
 
         def bs2b(w):
             zi = cmath.exp(-1j * w)
-            return (gain * _fo(1 - g_hi * (1 - x_hi), -x_hi, x_hi, zi), gain * _fo(g_lo * (1 - x_lo), 0.0, x_lo, zi))
+            return [(gain * _fo(1 - g_hi * (1 - x_hi), -x_hi, x_hi, zi), gain * _fo(g_lo * (1 - x_lo), 0.0, x_lo, zi))]
         return bs2b
     else:
         return None
 
     def mid_side(w):
+        return [_mid_side(w, amount) for amount in c.get("amounts", (1.0,))]
+
+    def _mid_side(w, amount):
         zi = cmath.exp(-1j * w)
-        side = _fo(*c["near"], zi) - _fo(*c["far"], zi) * cmath.exp(-1j * w * c["far_delay"])
+        side = _fo(*c["near"], zi) - amount * _fo(*c["far"], zi) * cmath.exp(-1j * w * c["far_delay"])
         if c["refl"]:
             s = sum(g * cmath.exp(-1j * w * n) for n, g in c["refl"])
             side += s * _fo(*c["hp"], zi) * _fo(*c["lp"], zi)
@@ -159,9 +172,9 @@ class Chain:
         er = 10 ** (self.eq_db(f, False) / 20)
         ol, orr = el, er
         if self.xf:
-            direct, cross = self.xf(w)
-            hi, lo = abs(direct), abs(cross)
-            ol, orr = hi * el + lo * er, hi * er + lo * el
+            pairs = [(abs(d), abs(c)) for d, c in self.xf(w)]
+            ol = max(hi * el + lo * er for hi, lo in pairs)
+            orr = max(hi * er + lo * el for hi, lo in pairs)
         return max(ol * self.trim_l, orr * self.trim_r)
 
     def boost_db(self) -> float:

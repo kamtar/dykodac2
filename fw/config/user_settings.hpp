@@ -37,8 +37,9 @@ enum class Crossfeed : std::uint8_t {
     Natural = 4U,     // side bass cut, ~0.45 ms interaural delay
     Speakers30 = 5U,  // spherical-head virtual speakers at +-30 deg
     Speakers45 = 6U,  // the same at +-45 deg
+    Spacious = 7U,    // full-range delayed crossfeed, side widened to keep reverb
 };
-inline constexpr std::uint8_t crossfeed_count = 7U;
+inline constexpr std::uint8_t crossfeed_count = 8U;
 // Automatic loudness leveler: off or its speed (attack / release).
 enum class Leveler : std::uint8_t { Off = 0U, Slow = 1U, Medium = 2U, Fast = 3U };
 inline constexpr std::uint8_t leveler_mode_count = 4U;

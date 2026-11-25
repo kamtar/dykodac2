@@ -396,7 +396,9 @@ class MainWindow(QMainWindow):
             "Natural: the centre passes untouched; only stereo differences lose their bass,\n"
             "  with a ~0.45 ms interaural delay (~0.4 dB headroom).\n"
             "Virtual speakers: spherical-head model of a speaker pair at ±30° / ±45° with early\n"
-            "  reflections, applied to stereo differences only, so the centre stays flat (~1.6-1.9 dB headroom).")
+            "  reflections, applied to stereo differences only, so the centre stays flat (~1.6-1.9 dB headroom).\n"
+            "Spacious: full-range delayed crossfeed with the stereo difference widened first, so the\n"
+            "  recording's own reverb and sense of space are kept; centre flat, nothing added (~2.6 dB headroom).")
         gf.addRow("Crossfeed", self.c_xf)
         lv.addWidget(g)
 

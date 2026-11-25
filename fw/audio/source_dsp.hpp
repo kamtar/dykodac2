@@ -103,6 +103,18 @@ struct CrossfeedCoefficients {
     bool post_enabled{false};
     Biquad post{};         // analysis form
     SvfParams post_svf{};  // runtime form
+    // Correlation-adaptive amount (Spacious): the far() term is scaled by
+    // an amount in [amount_min, amount_max] that follows the programme:
+    // less for diffuse sound (reverb), more for independent hard-panned
+    // sources. The boost analysis covers the whole range.
+    bool adaptive{false};
+    float amount_min{1.0F};
+    float amount_max{1.0F};
+    FirstOrder meter_highpass{};  // the detector ignores the (mostly centred) bass
+    std::uint16_t meter_block{0U}; // frames per detector block (10 ms)
+    float meter_smooth{0.0F};      // per-block smoothing of the statistics
+    float meter_gate{0.0F};        // block energy below this (silence) holds
+    float amount_smooth{0.0F};     // per-block glide of the amount
 };
 
 // Slots behind the user EQ bands for loudness compensation.
@@ -199,6 +211,11 @@ public:
     // Leveler gain currently applied (dB <= 0) and its target.
     float leveler_gain_db() const noexcept;
     float leveler_target_gain() const noexcept { return lev_target_; }
+    // Spacious crossfeed: current amount (1 = nominal) and the detector's
+    // waveform and envelope correlation of L and R.
+    float crossfeed_amount() const noexcept { return xf_amount_; }
+    float waveform_correlation() const noexcept { return waveform_correlation_; }
+    float envelope_correlation() const noexcept { return envelope_correlation_; }
 
     inline void process(float& left, float& right) noexcept {
         if (idle_) return;
@@ -212,6 +229,7 @@ public:
             if ((live_right_mask_ & bit) != 0U) r = run(right_[i], r);
         }
         if (xf_active_ && xf_.mid_side) {
+            if (xf_.adaptive) correlation_meter(l, r);
             const float m = 0.5F * (l + r);
             const float s = shuffle(0.5F * (l - r));
             l += (m + s - l) * xf_wet_;
@@ -288,7 +306,7 @@ private:
         const auto& c = xf_;
         line_[line_pos_] = s;
         float out = first_order(c.near, s, near_x1_, near_y1_) -
-                    first_order(c.far, line_[(line_pos_ - c.far_delay) & mask], far_x1_, far_y1_);
+                    xf_amount_ * first_order(c.far, line_[(line_pos_ - c.far_delay) & mask], far_x1_, far_y1_);
         if (c.reflection_count != 0U) {
             float sum = 0.0F;
             for (std::size_t i = 0U; i < c.reflection_count; ++i)
@@ -301,6 +319,17 @@ private:
         return out;
     }
     void clear_crossfeed_state() noexcept;
+    // Spacious: per-frame part of the correlation detector.
+    inline void correlation_meter(float l, float r) noexcept {
+        const float hl = first_order(xf_.meter_highpass, l, cm_x1_[0], cm_y1_[0]);
+        const float hr = first_order(xf_.meter_highpass, r, cm_x1_[1], cm_y1_[1]);
+        cm_ll_ += hl * hl;
+        cm_rr_ += hr * hr;
+        cm_lr_ += hl * hr;
+        xf_amount_ += xf_amount_step_;
+        if (++cm_fill_ >= xf_.meter_block) end_correlation_block();
+    }
+    void end_correlation_block() noexcept;
     inline void meter(float l, float r) noexcept {
         const float kl = biquad(lev_.k_highpass, biquad(lev_.k_shelf, l, k_state_[0], k_state_[1]),
                                 k_state_[2], k_state_[3]);
@@ -358,6 +387,22 @@ private:
     float refl_lp_x1_{0.0F};
     float refl_lp_y1_{0.0F};
     Band xf_post_{};
+    // Correlation detector (Spacious): one 10 ms block of sums, then slow
+    // statistics of the waveforms and of the block envelopes.
+    float xf_amount_{1.0F};
+    float xf_amount_step_{0.0F};
+    float cm_x1_[2]{};
+    float cm_y1_[2]{};
+    float cm_ll_{0.0F};
+    float cm_rr_{0.0F};
+    float cm_lr_{0.0F};
+    std::uint32_t cm_fill_{0U};
+    float cm_wave_[3]{};     // smoothed LL, RR, LR block sums
+    float cm_mean_[2]{};     // smoothed block amplitude L, R
+    float cm_env_[3]{};      // smoothed envelope covariance LL, RR, LR
+    bool cm_primed_{false};
+    float waveform_correlation_{1.0F};
+    float envelope_correlation_{0.5F};
     // Leveler. The loudness estimate and gain survive stream restarts and
     // redesigns; only the meter filters restart.
     LevelerDesign lev_{};
