@@ -7,7 +7,7 @@
 #include <array>
 
 namespace usb {
-enum class Event : std::uint8_t { None, Mounted, Detached, Suspended, Resumed, Start, Stop, Rate, Controls, Diagnostics, EventTrace, DmaDiagnostics, RefillTiming };
+enum class Event : std::uint8_t { None, Mounted, Detached, Suspended, Resumed, Start, Stop, Rate, Controls, Diagnostics, EventTrace, DmaDiagnostics, RefillTiming, EnterRomBootloader, BootInfo, Config };
 enum class Control : std::uint8_t { None, SampleRate, Mute, Volume, InterfaceAlternate };
 struct EventRecord {
     Event event{Event::None};
@@ -50,6 +50,12 @@ public:
     bool send_dma_diagnostics() noexcept;
     void update_refill_timing(const maintenance::RefillTimingReport& report) noexcept;
     bool send_refill_timing() noexcept;
+    bool send_boot_info(const void* report64) noexcept;
+    // One configuration request is held at a time; the host waits for the
+    // response before sending the next one.
+    const std::uint8_t* config_request() const noexcept { return config_request_.data(); }
+    void release_config_request() noexcept { config_request_pending_ = false; }
+    bool send_config_response(const void* report64) noexcept;
     std::uint32_t dropped_packets() const noexcept { return dropped_packets_; }
     std::uint32_t dropped_events() const noexcept { return dropped_events_; }
     std::uint32_t packet_count() const noexcept { return packet_count_; }
@@ -77,7 +83,7 @@ public: // callback-facing state; only TinyUSB callbacks in usb_device.cpp write
     std::uint32_t padding_errors_{0U};
     std::uint32_t dropped_packets_{0U};
     std::uint32_t dropped_events_{0U};
-    enum class PendingReport : std::uint8_t { None, Diagnostics, EventTrace, DmaDiagnostics, RefillTiming };
+    enum class PendingReport : std::uint8_t { None, Diagnostics, EventTrace, DmaDiagnostics, RefillTiming, BootInfo, Config };
     PendingReport pending_report_{PendingReport::None};
     std::array<EventRecord, 7U> event_history_{};
     std::uint8_t event_history_write_{0U};
@@ -86,5 +92,9 @@ public: // callback-facing state; only TinyUSB callbacks in usb_device.cpp write
     EventTraceReport event_trace_{};
     maintenance::DmaDiagnosticReport dma_diagnostics_{};
     maintenance::RefillTimingReport refill_timing_{};
+    std::array<std::uint8_t, 64U> boot_info_{};
+    std::array<std::uint8_t, 64U> config_request_{};
+    std::array<std::uint8_t, 64U> config_response_{};
+    bool config_request_pending_{false};
 };
 } // namespace usb

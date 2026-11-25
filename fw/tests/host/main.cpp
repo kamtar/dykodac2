@@ -31,6 +31,8 @@ extern "C" {
 #include <random>
 #include <vector>
 
+void run_settings_tests();
+
 namespace {
 double fft_direct_peak_error = 0.0;
 double fft_direct_worst_rms_error = 0.0;
@@ -402,10 +404,29 @@ int main() {
     for (std::size_t i = 0U; i < native_input.size(); ++i)
         native_input[i] = static_cast<std::uint8_t>(i * 13U);
     std::array<std::uint8_t, 32U> native_output{};
+    // Upsampler bypass keeps the float chain: gain, dither, one quantisation.
+    for (std::size_t i = 0U; i < 4U; ++i) {
+        pack_sample(native_input.data() + i * 8U, static_cast<std::int32_t>(400'000 * (i + 1U)));
+        pack_sample(native_input.data() + i * 8U + 4U, -static_cast<std::int32_t>(300'000 * (i + 1U)));
+    }
     check(native.input_frames_needed(4U) == 4U &&
           native.process(native_input.data(), 4U, native_output.data(), 4U) == 4U &&
-          native_output == native_input,
-          "native-rate path bypasses the FIR, gain and dither without changing PCM");
+          !native.last_native_bit_exact(),
+          "native-rate path applies gain when it is not unity");
+    for (std::size_t i = 0U; i < 8U; ++i) {
+        const std::int32_t in = unpack_sample(native_input.data() + i * 4U);
+        const std::int32_t out = unpack_sample(native_output.data() + i * 4U);
+        check(std::abs(static_cast<double>(out) - 0.25 * in) <= 1.0 && native_output[i * 4U] == 0U,
+              "native-rate gain is applied with one dithered quantisation");
+    }
+    for (std::size_t i = 0U; i < native_input.size(); ++i)
+        native_input[i] = static_cast<std::uint8_t>(i * 13U);
+    native.set_gain_target(1.0F);
+    check(native.configure(176'400U, 176'400U) &&
+          native.process(native_input.data(), 4U, native_output.data(), 4U) == 4U &&
+          native.last_native_bit_exact() && native_output == native_input,
+          "native-rate path is bit-perfect at unity gain with an identity chain");
+    run_settings_tests();
 
     // Direct binary64 convolution with the composite 4x prototype. These
     // vectors exercise every 256-frame partition and FFT boundary, both DMA

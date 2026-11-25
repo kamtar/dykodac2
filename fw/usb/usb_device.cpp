@@ -5,6 +5,7 @@
 #include "tusb.h"
 #include "usb/usb_descriptors.h"
 #include "usb/maintenance_protocol.hpp"
+#include "usb/config_protocol.hpp"
 
 #include <cstring>
 
@@ -45,6 +46,10 @@ void UsbDevice::task() noexcept {
              tud_hid_report(0U, &event_trace_, sizeof(event_trace_))) pending_report_ = PendingReport::None;
     else if (pending_report_ == PendingReport::DmaDiagnostics &&
              tud_hid_report(0U, &dma_diagnostics_, sizeof(dma_diagnostics_))) pending_report_ = PendingReport::None;
+    else if (pending_report_ == PendingReport::BootInfo &&
+             tud_hid_report(0U, boot_info_.data(), 64U)) pending_report_ = PendingReport::None;
+    else if (pending_report_ == PendingReport::Config &&
+             tud_hid_report(0U, config_response_.data(), 64U)) pending_report_ = PendingReport::None;
     else if (pending_report_ == PendingReport::RefillTiming &&
              tud_hid_report(0U, &refill_timing_, sizeof(refill_timing_))) pending_report_ = PendingReport::None;
 }
@@ -58,7 +63,8 @@ EventRecord UsbDevice::take_event() noexcept {
 bool UsbDevice::post_event(EventRecord event) noexcept {
     event.reserved = static_cast<std::uint16_t>(board::MonotonicTimer::now_ms());
     if (event.event != Event::Diagnostics && event.event != Event::EventTrace &&
-        event.event != Event::DmaDiagnostics && event.event != Event::RefillTiming) {
+        event.event != Event::DmaDiagnostics && event.event != Event::RefillTiming &&
+        event.event != Event::Config) {
         event_history_[event_history_write_] = event;
         event_history_write_ = static_cast<std::uint8_t>((event_history_write_ + 1U) % event_history_.size());
         if (event_history_count_ < event_history_.size()) ++event_history_count_;
@@ -121,6 +127,25 @@ bool UsbDevice::send_dma_diagnostics() noexcept {
     pending_report_ = PendingReport::DmaDiagnostics;
     return false;
 }
+bool UsbDevice::send_boot_info(const void* report64) noexcept {
+    std::memcpy(boot_info_.data(), report64, boot_info_.size());
+    if (tud_hid_ready() && tud_hid_report(0U, boot_info_.data(), 64U)) {
+        pending_report_ = PendingReport::None;
+        return true;
+    }
+    pending_report_ = PendingReport::BootInfo;
+    return false;
+}
+bool UsbDevice::send_config_response(const void* report64) noexcept {
+    std::memcpy(config_response_.data(), report64, config_response_.size());
+    if (tud_hid_ready() && tud_hid_report(0U, config_response_.data(), 64U)) {
+        pending_report_ = PendingReport::None;
+        return true;
+    }
+    pending_report_ = PendingReport::Config;
+    return false;
+}
+
 void UsbDevice::update_refill_timing(const maintenance::RefillTimingReport& report) noexcept {
     const std::uint16_t next_sequence = static_cast<std::uint16_t>(refill_timing_.sequence + 1U);
     refill_timing_ = report;
@@ -269,8 +294,22 @@ extern "C" std::uint16_t tud_hid_get_report_cb(std::uint8_t, std::uint8_t,
 extern "C" void tud_hid_set_report_cb(std::uint8_t, std::uint8_t,
     hid_report_type_t type, std::uint8_t const* buffer, std::uint16_t size) {
     if (!instance || type != HID_REPORT_TYPE_OUTPUT) return;
+    if (usb::config::is_request(buffer, size)) {
+        // Runs from tud_task() in main context. A request arriving while the
+        // previous one is unanswered is a host protocol error: drop it.
+        if (instance->config_request_pending_) return;
+        std::memcpy(instance->config_request_.data(), buffer, instance->config_request_.size());
+        instance->config_request_pending_ = true;
+        if (!instance->post_event(usb::Event::Config)) instance->config_request_pending_ = false;
+        return;
+    }
     if (usb::maintenance::is_get_diagnostics(buffer, size)) instance->post_event(usb::Event::Diagnostics);
     else if (usb::maintenance::is_get_events(buffer, size)) instance->post_event(usb::Event::EventTrace);
     else if (usb::maintenance::is_get_dma_diagnostics(buffer, size)) instance->post_event(usb::Event::DmaDiagnostics);
     else if (usb::maintenance::is_get_refill_timing(buffer, size)) instance->post_event(usb::Event::RefillTiming);
+    else if (usb::maintenance::is_enter_rom(buffer, size))
+        instance->post_event({usb::Event::EnterRomBootloader, usb::Control::None, 0U, 0xEB100000U});
+    else if (usb::maintenance::is_get_boot_info(buffer, size)) instance->post_event(usb::Event::BootInfo);
+    else if (const auto rom = usb::maintenance::parse_enter_rom_custom(buffer, size); rom.valid)
+        instance->post_event({usb::Event::EnterRomBootloader, usb::Control::None, rom.method, rom.argument});
 }

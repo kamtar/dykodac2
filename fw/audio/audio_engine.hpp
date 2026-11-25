@@ -4,6 +4,7 @@
 #include "audio/polyphase_upsampler.hpp"
 #include "audio/stream_buffer.hpp"
 #include "audio/volume.hpp"
+#include "config/user_settings.hpp"
 
 namespace audio {
 struct DmaDiagnosticSnapshot {
@@ -49,9 +50,26 @@ public:
     // and start(), which are main-context too, so no hand-off is needed.
     void set_volume_db(std::int16_t db_8_8) noexcept {
         volume_db_8_8_ = clamp_volume_db_8_8(db_8_8);
-        upsampler_.set_gain_target(mcu_gain_from_uac2_db(volume_db_8_8_));
+        apply_gain();
     }
     std::int16_t volume_db() const noexcept { return volume_db_8_8_; }
+    // User settings for the float chain (EQ, crossfeed, balance, polarity,
+    // headroom). Redesigns for the current source rate immediately; start()
+    // redesigns again for each new rate. Main context only.
+    void set_settings(const settings::Settings& s) noexcept {
+        settings_ = s;
+        redesign();
+    }
+    // Worst-case boost of the active chain (dB >= 0), compensated inside the
+    // source DSP chain (time-aligned with the EQ), and the headroom actually
+    // in effect.
+    float dsp_boost_db() const noexcept { return boost_db_; }
+    float effective_headroom_db() const noexcept {
+        return static_cast<float>(settings_.headroom_db_8_8) / 256.0F - boost_db_;
+    }
+    bool native_bit_exact() const noexcept { return upsampler_.last_native_bit_exact(); }
+    std::uint32_t source_rate_hz() const noexcept { return upsampler_.input_rate_hz(); }
+    std::uint32_t output_rate_hz() const noexcept { return upsampler_.output_rate_hz(); }
     bool start_silence(const FormatConfig& config) noexcept;
     bool start(const FormatConfig& config, StreamBuffer& stream) noexcept;
     void service() noexcept;
@@ -68,6 +86,21 @@ public:
     void on_dma_complete(bool success, bool queue_empty, std::uint8_t completed,
                          std::uint8_t observed) noexcept;
 private:
+    void apply_gain() noexcept {
+        // The EQ boost is not part of the output gain: SourceDsp applies the
+        // matching makeup in the chain, so it changes together with the EQ
+        // instead of one interpolator latency ahead of it.
+        upsampler_.set_gain_target(mcu_gain_from_uac2_db(volume_db_8_8_, settings_.headroom_db_8_8));
+    }
+    void redesign() noexcept {
+        // Before the first start there is no source rate yet; design for
+        // 48 kHz so the reported boost is meaningful. start() redesigns.
+        const std::uint32_t rate = upsampler_.input_rate_hz();
+        const SourceDspDesign design = design_source_dsp(settings_, rate != 0U ? rate : 48'000U);
+        upsampler_.dsp().set_design(design);
+        boost_db_ = design.boost_db;
+        apply_gain();
+    }
     std::uint8_t* prepare_next_buffer() noexcept;
     std::uint8_t* timed_prepare_next_buffer() noexcept;
     bool take_refill_request() noexcept;
@@ -84,6 +117,8 @@ private:
     std::size_t transfer_frames_{0U};
     PolyphaseUpsampler upsampler_{};
     std::int16_t volume_db_8_8_{default_volume_db_8_8};
+    settings::Settings settings_{settings::defaults()};
+    float boost_db_{0.0F};
     bool concealment_active_{false};
     DmaDiagnosticSnapshot dma_diagnostics_{};
     RefillTimingSnapshot refill_timing_{};

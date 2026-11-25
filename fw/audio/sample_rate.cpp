@@ -28,6 +28,20 @@ constexpr std::array<FormatConfig, 2> formats{{
      (DYKODAC_RATE_48K << 16U) / 8'000U, 0U,
      DYKODAC_OUTPUT_RATE_48K, DYKODAC_OSC_48K, ClockFamily::Family48k},
 }};
+// Upsampler bypass: the host rate goes straight to the CS4398 in
+// single-speed mode (dac_mode 1). Each oscillator is then exactly 512 fs.
+constexpr std::array<FormatConfig, 2> bypass_formats{{
+    {{DYKODAC_RATE_44K1, DYKODAC_CHANNELS, DYKODAC_SUBSLOT_BYTES * 8U, DYKODAC_VALID_BITS}, ClockFamily::Family44k1, DYKODAC_OSC_44K1, 512U,
+     max_hs_packet(DYKODAC_RATE_44K1), 1U, output_dma_frames(DYKODAC_RATE_44K1),
+     (DYKODAC_RATE_44K1 << 16U) / 8'000U, 1U,
+     DYKODAC_RATE_44K1, DYKODAC_OSC_44K1, ClockFamily::Family44k1},
+    {{DYKODAC_RATE_48K, DYKODAC_CHANNELS, DYKODAC_SUBSLOT_BYTES * 8U, DYKODAC_VALID_BITS}, ClockFamily::Family48k, DYKODAC_OSC_48K, 512U,
+     max_hs_packet(DYKODAC_RATE_48K), 1U, output_dma_frames(DYKODAC_RATE_48K),
+     (DYKODAC_RATE_48K << 16U) / 8'000U, 1U,
+     DYKODAC_RATE_48K, DYKODAC_OSC_48K, ClockFamily::Family48k},
+}};
+static_assert(DYKODAC_RATE_44K1 * 512U == DYKODAC_OSC_44K1);
+static_assert(DYKODAC_RATE_48K * 512U == DYKODAC_OSC_48K);
 static_assert(DYKODAC_OUTPUT_RATE_44K1 * 128U == DYKODAC_OSC_44K1);
 static_assert(DYKODAC_OUTPUT_RATE_48K * 128U == DYKODAC_OSC_48K);
 static_assert(max_hs_packet(DYKODAC_RATE_44K1) == DYKODAC_USB_HS_MAX_PACKET);
@@ -36,6 +50,14 @@ static_assert(max_hs_packet(DYKODAC_RATE_48K) == DYKODAC_USB_HS_MAX_PACKET);
 
 const FormatConfig* find_format(std::uint32_t sample_rate_hz) noexcept {
     for (const auto& config : formats) {
+        if (config.format.sample_rate_hz == sample_rate_hz) return &config;
+    }
+    return nullptr;
+}
+
+const FormatConfig* find_format(std::uint32_t sample_rate_hz, bool upsampler_bypass) noexcept {
+    if (!upsampler_bypass) return find_format(sample_rate_hz);
+    for (const auto& config : bypass_formats) {
         if (config.format.sample_rate_hz == sample_rate_hz) return &config;
     }
     return nullptr;

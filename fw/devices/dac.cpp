@@ -60,21 +60,28 @@ bool Cs4398::set_attenuation(std::int16_t db_8_8) noexcept {
     return true;
 }
 
-bool Cs4398::configure_format(const audio::FormatConfig& format) noexcept {
-    const bool family_44k1 = format.output_sample_rate_hz == DYKODAC_OUTPUT_RATE_44K1 &&
+bool Cs4398::configure_format(const audio::FormatConfig& format, bool slow_rolloff) noexcept {
+    const bool quad = format.dac_mode == 0U;
+    const bool single = format.dac_mode == 1U;
+    const std::uint32_t rate_44k1 = quad ? DYKODAC_OUTPUT_RATE_44K1 : DYKODAC_RATE_44K1;
+    const std::uint32_t rate_48k = quad ? DYKODAC_OUTPUT_RATE_48K : DYKODAC_RATE_48K;
+    const std::uint32_t mclk_ratio = quad ? 128U : 512U;
+    const bool family_44k1 = format.output_sample_rate_hz == rate_44k1 &&
                              format.output_oscillator_hz == DYKODAC_OSC_44K1;
-    const bool family_48k = format.output_sample_rate_hz == DYKODAC_OUTPUT_RATE_48K &&
+    const bool family_48k = format.output_sample_rate_hz == rate_48k &&
                             format.output_oscillator_hz == DYKODAC_OSC_48K;
-    if (state_ != State::ReadyMuted || format.dac_mode != 0U || (!family_44k1 && !family_48k) ||
-        format.output_oscillator_hz != format.output_sample_rate_hz * 128U)
+    if (state_ != State::ReadyMuted || (!quad && !single) || (!family_44k1 && !family_48k) ||
+        format.output_oscillator_hz != format.output_sample_rate_hz * mclk_ratio)
         return false;
+    const auto mode = quad ? dac_registers::Control2::QuadSpeedI2s : dac_registers::Control2::SingleSpeedI2s;
+    std::uint8_t control7 = static_cast<std::uint8_t>(dac_registers::Control7::FastRollOff);
+    if (slow_rolloff) control7 = static_cast<std::uint8_t>(control7 | dac_registers::control7_slow_rolloff_bit);
     transport_.set_chip_select(true);
     bool ok = transport_.transfer(write_command(dac_registers::Register::Control2,
-        static_cast<std::uint8_t>(dac_registers::Control2::QuadSpeedI2s)));
+        static_cast<std::uint8_t>(mode)));
     transport_.set_chip_select(false);
     transport_.set_chip_select(true);
-    ok = transport_.transfer(write_command(dac_registers::Register::Control7,
-        static_cast<std::uint8_t>(dac_registers::Control7::FastRollOff))) && ok;
+    ok = transport_.transfer(write_command(dac_registers::Register::Control7, control7)) && ok;
     transport_.set_chip_select(false);
     if (!ok) safe_fault();
     return ok;

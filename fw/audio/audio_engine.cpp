@@ -147,6 +147,9 @@ bool AudioEngine::start(const FormatConfig& config, StreamBuffer& stream) noexce
     if (transfer_bytes_ > sizeof(dma_audio[0])) return false;
     transfer_frames_ = config.dma_frames_per_transfer;
     if (!upsampler_.configure(config.format.sample_rate_hz, config.output_sample_rate_hz)) return false;
+    // Coefficients depend on the source rate; the boost (and so the gain)
+    // is settled before the first buffer is generated.
+    redesign();
     board::target::initialize_audio_pins();
     IOMUXC_SetSaiMClkClockSource(IOMUXC_GPR, kIOMUXC_GPR_SAI1MClk1Sel, 3U);
 

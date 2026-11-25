@@ -1,4 +1,5 @@
 #include "app/app_controller.hpp"
+#include "app/config_service.hpp"
 #include "audio/audio_engine.hpp"
 #include "audio/feedback_controller.hpp"
 #include "audio/sample_rate.hpp"
@@ -11,6 +12,8 @@
 #include "devices/dac.hpp"
 #include "platform/nxp/flexio_dac_transport.hpp"
 #include "platform/nxp/mpu_config.hpp"
+#include "platform/nxp/rom_bootloader.hpp"
+#include "platform/nxp/settings_flash.hpp"
 #include "usb/usb_device.hpp"
 
 #include <new>
@@ -50,12 +53,22 @@ struct Runtime {
     bool resume_pending{false};
     StartStep last_stop_step{StartStep::None};
     StopReason stop_reason{StopReason::None};
+    // User settings that shape the start sequence (format table, DAC
+    // registers); the float chain itself lives in AudioEngine.
+    app::ConfigService config;
+    bool upsampler_bypass{false};
+    bool dac_slow_rolloff{false};
+    std::int16_t dac_ceiling_db_8_8{config::board::dac_ceiling_db_8_8};
 };
+
+const audio::FormatConfig* format_for(const Runtime& r, std::uint32_t rate) {
+    return audio::find_format(rate, r.upsampler_bypass);
+}
 
 // Host volume is an MCU gain; the DAC attenuation registers only ever hold
 // this fixed safety ceiling (see config/board_config.hpp).
 bool apply_dac_ceiling(Runtime& r) {
-    return r.dac.set_attenuation(config::board::dac_ceiling_db_8_8);
+    return r.dac.set_attenuation(r.dac_ceiling_db_8_8);
 }
 
 bool reached(std::uint32_t now, std::uint32_t deadline) {
@@ -146,7 +159,7 @@ void run_start(Runtime& r, std::uint32_t now) {
     case StartStep::ClockSettle:
         if (!reached(now, r.deadline)) break;
         r.clocks.mark_stable();
-        if (!r.dac.configure_format(*r.desired)) { safe_stop(r, true, StopReason::DacConfigure); break; }
+        if (!r.dac.configure_format(*r.desired, r.dac_slow_rolloff)) { safe_stop(r, true, StopReason::DacConfigure); break; }
         // Re-assert the fixed ceiling with every DAC format (re)configuration,
         // always before the unmute in the Stable step.
         if (!apply_dac_ceiling(r)) { safe_stop(r, true, StopReason::VolumeControl); break; }
@@ -273,9 +286,68 @@ void refresh_diagnostics(Runtime& r, std::uint32_t now) {
     if (r.usb.clock_valid()) report.flags |= 0x80U;
     r.usb.update_diagnostics(report);
 }
+class ConfigBackend final : public app::ConfigBackend {
+public:
+    explicit ConfigBackend(Runtime& r) noexcept : r_(r) {}
+    void set_now(std::uint32_t now) noexcept { now_ = now; }
+
+    void apply(const settings::Settings& s) noexcept override {
+        r_.engine.set_settings(s);
+        if (s.dac_ceiling_db_8_8 != r_.dac_ceiling_db_8_8) {
+            r_.dac_ceiling_db_8_8 = s.dac_ceiling_db_8_8;
+            // The DAC soft-ramps attenuation changes; before bootstrap the
+            // USB-init path writes the new ceiling instead.
+            if (r_.dac.ready_muted() && !apply_dac_ceiling(r_)) safe_stop(r_, true, StopReason::VolumeControl);
+        }
+        const bool bypass = s.upsampler_mode == static_cast<std::uint8_t>(settings::UpsamplerMode::Bypass);
+        const bool slow = s.dac_filter == static_cast<std::uint8_t>(settings::DacFilter::SlowRollOff);
+        if (bypass == r_.upsampler_bypass && slow == r_.dac_slow_rolloff) return;
+        r_.upsampler_bypass = bypass;
+        r_.dac_slow_rolloff = slow;
+        if (!r_.usb_ready) return; // the first start already uses the new mode
+        // Output rate and DAC speed mode change: go through the complete
+        // pop-safe sequence (relay open, mute, reclock, settle, unmute).
+        const audio::FormatConfig* format = format_for(r_, r_.usb.requested_rate());
+        if (!format) return;
+        r_.desired = format;
+        if (r_.stream_requested) begin_start(r_, now_);
+        else if (r_.engine.running()) safe_stop(r_, false, StopReason::HostStop);
+    }
+    // The firmware never writes flash; the host saves via the flashloader.
+    bool flash_available() const noexcept override { return false; }
+    app::FlashResult flash_load(settings::Settings& out, std::uint32_t& sequence) noexcept override {
+        return platform::nxp::settings_flash::load(out, sequence);
+    }
+    app::FlashResult flash_save(const settings::Settings&, std::uint32_t&) noexcept override {
+        return app::FlashResult::Unavailable;
+    }
+    void fill_runtime_info(usb::config::Info& info) noexcept override {
+        if (r_.engine.running()) {
+            info.source_rate_hz = r_.engine.source_rate_hz();
+            info.output_rate_hz = r_.engine.output_rate_hz();
+        }
+        info.host_volume_db_8_8 = r_.engine.volume_db();
+        info.dsp_boost_db = r_.engine.dsp_boost_db();
+        info.effective_headroom_db = r_.engine.effective_headroom_db();
+        info.app_state = static_cast<std::uint8_t>(r_.app.state());
+        info.upsampler_bypass_active = r_.active && r_.active->dac_mode == 1U ? 1U : 0U;
+        if (r_.stream_requested) info.flags |= usb::config::flag_streaming;
+        if (r_.engine.running() && info.upsampler_bypass_active != 0U && r_.engine.native_bit_exact())
+            info.flags |= usb::config::flag_bit_exact;
+    }
+    bool peek_rom(std::uint32_t address, std::uint8_t* out, std::size_t length) noexcept override {
+        return platform::nxp::settings_flash::peek_rom(address, out, length);
+    }
+private:
+    Runtime& r_;
+    std::uint32_t now_{0U};
+};
 } // namespace
 
 int main() {
+    // Flashing request from the previous run: hand over to the boot ROM USB
+    // serial downloader before anything else is configured.
+    platform::nxp::enter_rom_bootloader_if_requested();
     platform::nxp::configure_mpu();
     board::target::initialize_diagnostic_led_early();
     board::target::set_red_led(true);
@@ -295,6 +367,10 @@ int main() {
     runtime.relay.initialize_safe();
     // Start from the device's current host volume, never unity by accident.
     runtime.engine.set_volume_db(runtime.usb.controls().volume_db_8_8);
+    // Saved user settings (or defaults) before anything starts: they choose
+    // the output format, DAC filter and ceiling of the very first start.
+    static ConfigBackend config_backend{runtime};
+    runtime.config.boot(config_backend);
     runtime.clocks.initialize_safe();
     if (!board::MonotonicTimer::initialize(SystemCoreClock)) for (;;) __asm volatile("wfi");
     runtime.app.dispatch(app::Event::Initialize);
@@ -307,7 +383,7 @@ int main() {
         // blocks here while the circular DMA ring keeps transmitting.
         runtime.engine.service();
         if (!runtime.usb_ready && runtime.dac.ready_muted()) {
-            runtime.desired = &audio::supported_format(0U);
+            runtime.desired = format_for(runtime, audio::supported_format(0U).format.sample_rate_hz);
             runtime.active = runtime.desired;
             runtime.feedback.reset(*runtime.active, audio::StreamBuffer::capacity_bytes / 2U);
             if (!runtime.usb.initialize(runtime.stream, runtime.feedback)) { safe_stop(runtime, true, StopReason::UsbInit); }
@@ -330,7 +406,7 @@ int main() {
             // Re-resolve the stream format from the clock rate most recently
             // selected by the host. This also handles hosts that send SET_CUR
             // before changing the streaming alternate setting.
-            runtime.desired = audio::find_format(runtime.usb.requested_rate());
+            runtime.desired = format_for(runtime, runtime.usb.requested_rate());
             if (!runtime.desired) { safe_stop(runtime, true, StopReason::UnsupportedRate); break; }
             runtime.usb.start_feedback();
             if (runtime.app.state() == app::State::Playing && runtime.engine.running() &&
@@ -345,7 +421,7 @@ int main() {
             }
             break;
         case usb::Event::Rate:
-            runtime.desired = audio::find_format(usb_event.value);
+            runtime.desired = format_for(runtime, usb_event.value);
             if (!runtime.desired) safe_stop(runtime, true, StopReason::UnsupportedRate);
             else {
                 runtime.feedback.reset(*runtime.desired, audio::StreamBuffer::capacity_bytes / 2U);
@@ -424,6 +500,25 @@ int main() {
             report.queue_drains = source.queue_drains;
             runtime.usb.update_refill_timing(report);
             runtime.usb.send_refill_timing();
+            break;
+        }
+        case usb::Event::EnterRomBootloader:
+            // Leave the analog path safe; the reset then returns every pin to
+            // its reset default (relay open) before the ROM takes over.
+            safe_stop(runtime, false, StopReason::HostStop);
+            runtime.dac.set_mute(true);
+            platform::nxp::reboot_to_rom_bootloader(usb_event.value,
+                static_cast<platform::nxp::RomEntryMethod>(usb_event.reserved));
+        case usb::Event::BootInfo: {
+            const auto info = platform::nxp::boot_info();
+            runtime.usb.send_boot_info(&info);
+            break;
+        }
+        case usb::Event::Config: {
+            config_backend.set_now(now);
+            const auto response = runtime.config.handle(runtime.usb.config_request(), 64U, config_backend);
+            runtime.usb.release_config_request();
+            runtime.usb.send_config_response(&response);
             break;
         }
         default: break;

@@ -2,7 +2,10 @@ ENTRY(ResetISR)
 
 MEMORY
 {
-    FLASH (rx) : ORIGIN = 0x60000000, LENGTH = 0x100000
+    /* The last two 4 KiB sectors (0x600FE000..0x600FFFFF) hold the user
+       settings A/B records (platform/nxp/settings_flash.hpp); the image must
+       never reach them, and a firmware update erases only the image. */
+    FLASH (rx) : ORIGIN = 0x60000000, LENGTH = 0xFE000
     SRAM_OC (rwx) : ORIGIN = 0x20200000, LENGTH = 0xFFE0
     SRAM_DTC (rwx) : ORIGIN = 0x20000000, LENGTH = 32K
     SRAM_ITC (rwx) : ORIGIN = 0x00000000, LENGTH = 32K
@@ -66,6 +69,13 @@ SECTIONS
         . = ALIGN(32);
         __dtcm_history_end__ = .;
     } > SRAM_DTC
+    /* Reboot-to-ROM mailbox: never initialised by startup code, so it survives
+       a warm reset. DTCM is not used by the RT1011 boot ROM (it uses OCRAM). */
+    .dtcm_mailbox (NOLOAD) : ALIGN(32)
+    {
+        KEEP(*(.dtcm_mailbox*))
+        . = ALIGN(32);
+    } > SRAM_DTC
     .dtcm_coefficients : ALIGN(32)
     {
         __dtcm_coefficients_start__ = .;
@@ -89,4 +99,5 @@ SECTIONS
     ASSERT(__dtcm_coefficients_end__ <= _vStackBase, "DTCM FFT state overlaps the stack")
     ASSERT(SIZEOF(.fft_state_ocram) + SIZEOF(.bss) + SIZEOF(.data) + SIZEOF(.noinit) <= LENGTH(SRAM_OC), "OCRAM overflow")
     ASSERT(SIZEOF(.itcm_text) <= LENGTH(SRAM_ITC), "ITCM hot code exceeds ITCM")
+    ASSERT(ORIGIN(FLASH) + LENGTH(FLASH) == 0x600FE000, "settings sectors moved")
 }

@@ -39,6 +39,7 @@ STOP_REASONS = [
 EVENTS = [
     "None", "Mounted", "Detached", "Suspended", "Resumed", "Start", "Stop",
     "Rate", "Controls", "Diagnostics", "EventTrace", "DmaDiagnostics", "RefillTiming",
+    "EnterRomBootloader", "BootInfo", "Config",
 ]
 CONTROLS = ["None", "SampleRate", "Mute", "Volume", "InterfaceAlternate"]
 

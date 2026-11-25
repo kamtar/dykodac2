@@ -182,6 +182,8 @@ void PolyphaseUpsampler::reset(std::uint32_t input_rate_hz,
     gain_ = gain_target_;
     gain_step_ = output_rate_hz != 0U ?
         1.0F / (gain_ramp_seconds * static_cast<float>(output_rate_hz)) : 1.0F;
+    dsp_.reset_state();
+    native_bit_exact_ = false;
     dither_state_[0] = dither_seed_left;
     dither_state_[1] = dither_seed_right;
     fft_history.fill(0.0F);
@@ -251,6 +253,9 @@ DYKODAC_FFT_HOT bool PolyphaseUpsampler::begin_fft_block() noexcept {
 void PolyphaseUpsampler::append_input(const std::uint8_t* input,
                                       std::size_t input_frames) noexcept {
     if (input == nullptr) return;
+    // Neutral settings (the default) run exactly the pre-EQ code: the chain
+    // is not entered at all, not even per sample.
+    const bool processing = !dsp_.identity();
     for (std::size_t frame = 0U; frame < input_frames; ++frame) {
         if (input_fill_ == partition_size) {
             // With the production 1 ms cadence the four slices finish before
@@ -258,9 +263,11 @@ void PolyphaseUpsampler::append_input(const std::uint8_t* input,
             // block if a caller violates that bounded schedule.
             if (!begin_fft_block()) break;
         }
-        input_block[input_fill_] = decode_sample(input + frame * pcm_bytes_per_frame);
-        input_block[partition_size + input_fill_] =
-            decode_sample(input + frame * pcm_bytes_per_frame + 4U);
+        float left = decode_sample(input + frame * pcm_bytes_per_frame);
+        float right = decode_sample(input + frame * pcm_bytes_per_frame + 4U);
+        if (processing) dsp_.process(left, right);
+        input_block[input_fill_] = left;
+        input_block[partition_size + input_fill_] = right;
         ++input_fill_;
     }
     if (input_fill_ == partition_size && active_slice_ == slices_per_block)
@@ -451,6 +458,49 @@ void PolyphaseUpsampler::write_output(std::uint8_t* output,
     }
 }
 
+std::size_t PolyphaseUpsampler::process_native(const std::uint8_t* input,
+                                               std::uint8_t* output,
+                                               std::size_t frames) noexcept {
+    // Bit-perfect only while nothing would change a sample. The dither
+    // sequence is not advanced then, which is harmless: it restarts from an
+    // arbitrary state the moment processing becomes non-trivial.
+    native_bit_exact_ = dsp_.identity() && gain_ == 1.0F && gain_target_ == 1.0F;
+#if defined(DYKODAC_HOST_TEST)
+    last_float_frames_ = frames < output_queue_frames ? frames : output_queue_frames;
+#endif
+    if (native_bit_exact_) {
+        std::memmove(output, input, frames * pcm_bytes_per_frame);
+#if defined(DYKODAC_HOST_TEST)
+        for (std::size_t frame = 0U; frame < last_float_frames_; ++frame) {
+            last_float_output[frame * channels] = decode_sample(input + frame * pcm_bytes_per_frame);
+            last_float_output[frame * channels + 1U] =
+                decode_sample(input + frame * pcm_bytes_per_frame + 4U);
+        }
+#endif
+        return frames;
+    }
+    for (std::size_t frame = 0U; frame < frames; ++frame) {
+        float left = decode_sample(input + frame * pcm_bytes_per_frame);
+        float right = decode_sample(input + frame * pcm_bytes_per_frame + 4U);
+        dsp_.process(left, right);
+#if defined(DYKODAC_HOST_TEST)
+        if (frame < last_float_frames_) {
+            last_float_output[frame * channels] = left;
+            last_float_output[frame * channels + 1U] = right;
+        }
+#endif
+        const float gain = next_gain();
+        const std::int32_t l = quantise_sample(left * gain, tpdf_dither(dither_state_[0]));
+        const std::int32_t r = quantise_sample(right * gain, tpdf_dither(dither_state_[1]));
+        auto* const destination = output + frame * pcm_bytes_per_frame;
+        const auto lw = static_cast<std::uint32_t>(l) << 8U;
+        const auto rw = static_cast<std::uint32_t>(r) << 8U;
+        std::memcpy(destination, &lw, 4U);
+        std::memcpy(destination + 4U, &rw, 4U);
+    }
+    return frames;
+}
+
 std::size_t PolyphaseUpsampler::process(const std::uint8_t* input,
                                         std::size_t input_frames,
                                         std::uint8_t* output,
@@ -459,15 +509,7 @@ std::size_t PolyphaseUpsampler::process(const std::uint8_t* input,
     if (!exact_4x_) {
         const std::size_t produced = input_frames < output_frames ? input_frames : output_frames;
         if (produced == 0U || input == nullptr) return 0U;
-        std::memmove(output, input, produced * pcm_bytes_per_frame);
-#if defined(DYKODAC_HOST_TEST)
-        last_float_frames_ = produced < output_queue_frames ? produced : output_queue_frames;
-        for (std::size_t frame = 0U; frame < last_float_frames_; ++frame) {
-            last_float_output[frame * channels] = decode_sample(input + frame * pcm_bytes_per_frame);
-            last_float_output[frame * channels + 1U] =
-                decode_sample(input + frame * pcm_bytes_per_frame + 4U);
-        }
-#endif
+        process_native(input, output, produced);
         position_numerator_ += static_cast<std::uint64_t>(produced) * input_rate_hz_;
         return produced;
     }

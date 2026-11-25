@@ -51,6 +51,33 @@ py -m pip install hidapi
 py tools/read_diagnostics.py
 ```
 
+## Flash over USB
+
+No need to open the case or touch boot pins after the first install:
+
+```powershell
+build.bat
+flash.bat
+```
+
+`flash.bat` flashes the last Release build and installs `spsdk`/`hidapi` into a
+private `tools/.venv` on first use. Extra arguments go to `tools/flash_firmware.py`.
+
+See `docs/firmware-update.md` (needs NXP's RT1010 `ivt_flashloader.bin`).
+
+## Configurator (GUI)
+
+```powershell
+make_configurator.bat
+tools\dist\DykoDAC2-Configurator.exe
+```
+
+Read / Write to RAM / Save to flash / Load from flash / Defaults, upsampler
+bypass, CS4398 filter, headroom (EQ boost subtracted automatically), DAC
+ceiling, balance, polarity, crossfeed, a 10-band parametric EQ with AutoEQ
+import and PC-side EQ presets, plus a live diagnostics tab. See
+`docs/configurator.md`. Scriptable: `cd tools; python -m dykodac_config info`.
+
 ## Verified safe-idle hardware baseline
 
 The 2026-07-19 Debug FlexSPI NOR image booted successfully when programmed as a

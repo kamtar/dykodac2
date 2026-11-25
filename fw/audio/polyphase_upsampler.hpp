@@ -2,6 +2,7 @@
 
 #include "audio/fft_filter_spectra.hpp"
 #include "audio/halfband_coefficients.hpp"
+#include "audio/source_dsp.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -18,7 +19,10 @@ namespace audio {
 //
 // The final output is the only quantisation in the path:
 //   round_half_away(value * gain + tpdf_dither) saturated to signed 24 bit.
-// Equal-rate native streams bypass all filter work byte for byte.
+// Equal-rate native streams (upsampler bypass) skip the interpolator but keep
+// the same float chain and single dithered quantisation; they are copied
+// byte for byte only while the chain is an exact identity (unity gain, no
+// EQ/crossfeed/balance/polarity).
 class PolyphaseUpsampler {
 public:
     static constexpr std::uint32_t default_output_rate_hz = 192'000U;
@@ -107,6 +111,13 @@ public:
     float gain_target() const noexcept { return gain_target_; }
     float current_gain() const noexcept { return gain_; }
 
+    // Source-rate EQ/crossfeed/balance/polarity, applied in float to every
+    // decoded source frame in both the 4x and the bypass path. Main context.
+    SourceDsp& dsp() noexcept { return dsp_; }
+    const SourceDsp& dsp() const noexcept { return dsp_; }
+    // True when the last native (bypass) block was copied bit-for-bit.
+    bool last_native_bit_exact() const noexcept { return native_bit_exact_; }
+
     // Converts signed 24-bit stereo PCM in 32-bit left-justified slots. Exact
     // 4x configurations always return output_frames; deterministic startup
     // latency is represented by digital zero until the first FFT block is due.
@@ -141,6 +152,8 @@ private:
     float next_gain() noexcept;
     void append_input(const std::uint8_t* input, std::size_t input_frames) noexcept;
     void write_output(std::uint8_t* output, std::size_t output_frames) noexcept;
+    std::size_t process_native(const std::uint8_t* input, std::uint8_t* output,
+                               std::size_t frames) noexcept;
 
     std::uint32_t input_rate_hz_{0U};
     std::uint32_t output_rate_hz_{default_output_rate_hz};
@@ -159,6 +172,8 @@ private:
     std::uint32_t dither_state_[2]{1U, 2U};
     bool block_queue_ok_{false};
     bool exact_4x_{false};
+    bool native_bit_exact_{false};
+    SourceDsp dsp_{};
 #if defined(DYKODAC_HOST_TEST)
     std::size_t last_float_frames_{0U};
     std::uint64_t stage1_blocks_{0U};

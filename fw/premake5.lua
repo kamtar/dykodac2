@@ -51,6 +51,8 @@ local app_sources = {
     "app/app_controller.cpp", "audio/audio_engine.cpp", "audio/stream_buffer.cpp", "audio/feedback_controller.cpp",
     "audio/sample_rate.cpp", "audio/polyphase_upsampler.cpp", "board/clock_manager.cpp", "board/monotonic_timer.cpp", "board/output_relay.cpp",
     "board/target_board.cpp", "devices/dac.cpp", "platform/nxp/main.cpp", "platform/nxp/mpu_config.cpp",
+    "platform/nxp/rom_bootloader.cpp", "platform/nxp/settings_flash.cpp",
+    "app/config_service.cpp", "audio/source_dsp.cpp",
     "platform/nxp/flexio_dac_transport.cpp", "usb/usb_device.cpp", "usb/usb_descriptors.cpp",
     "third_party/tinyusb/src/class/audio/audio_device.c", nxp_sdk .. "/drivers/fsl_gpio.c",
     nxp_sdk .. "/drivers/fsl_flexio.c", nxp_sdk .. "/drivers/fsl_flexio_spi.c", nxp_sdk .. "/drivers/fsl_dmamux.c",
@@ -81,7 +83,7 @@ app_project("dykodac2_fw")
 project "dykodac2_host_tests"
     kind "ConsoleApp"
     targetdir "build/gmake2/bin/%{cfg.buildcfg}" objdir "build/gmake2/obj/%{cfg.buildcfg}/%{prj.name}"
-    files { "app/app_controller.cpp", "audio/sample_rate.cpp", "audio/polyphase_upsampler.cpp", "audio/stream_buffer.cpp", "audio/feedback_controller.cpp",
+    files { "app/app_controller.cpp", "app/config_service.cpp", "audio/source_dsp.cpp", "audio/sample_rate.cpp", "audio/polyphase_upsampler.cpp", "audio/stream_buffer.cpp", "audio/feedback_controller.cpp",
         "devices/dac.cpp",
         "usb/usb_event_queue_host.cpp", "tests/host/**.cpp" }
     for _,f in ipairs(cmsis_dsp_fft) do files { f } end

@@ -8,3 +8,8 @@
 *.lst
 *.su
 
+/tools/.venv/
+__pycache__/
+/tools/dist/
+/tools/build/
+/tools/*.spec

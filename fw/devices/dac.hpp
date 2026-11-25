@@ -58,7 +58,7 @@ public:
     bool ready_muted() const noexcept { return state_ == State::ReadyMuted; }
     bool set_mute(bool muted) noexcept;
     bool set_attenuation(std::int16_t db_8_8) noexcept;
-    bool configure_format(const audio::FormatConfig& format) noexcept;
+    bool configure_format(const audio::FormatConfig& format, bool slow_rolloff = false) noexcept;
     void safe_fault() noexcept;
     bool muted() const noexcept { return muted_; }
     std::int16_t attenuation_db_8_8() const noexcept { return attenuation_db_8_8_; }
