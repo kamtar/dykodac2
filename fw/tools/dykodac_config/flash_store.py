@@ -148,13 +148,23 @@ def save_settings(settings: p.Settings, flashloader: Path | None = None,
             _wait_for(SDP_ID, "the RT1011 boot ROM", timeout)
         ivt_offset, ivt_address = _find_ivt(loader)
         progress("Starting the RAM flashloader...")
-        interfaces = SdpUSBInterface.scan(device_id=f"0x{SDP_ID[0]:04x},0x{SDP_ID[1]:04x}")
-        if not interfaces:
-            raise FlashStoreError("boot ROM vanished from USB")
-        with SDP(interfaces[0]) as sdp:
-            if not sdp.write_file(ivt_address - ivt_offset, loader):
-                raise FlashStoreError("could not load the flashloader into RAM")
-            sdp.jump_and_run(ivt_address)
+        # Right after re-enumeration Windows may still be binding the ROM's HID
+        # interface; retry the open/load briefly instead of failing the save.
+        deadline, last = time.monotonic() + 5.0, "boot ROM vanished from USB"
+        while True:
+            try:
+                interfaces = SdpUSBInterface.scan(device_id=f"0x{SDP_ID[0]:04x},0x{SDP_ID[1]:04x}")
+                if interfaces:
+                    with SDP(interfaces[0]) as sdp:
+                        if sdp.write_file(ivt_address - ivt_offset, loader):
+                            sdp.jump_and_run(ivt_address)
+                            break
+                        last = f"could not load the flashloader into RAM: {sdp.status_code}"
+            except Exception as e:  # noqa: BLE001 - spsdk raises various transport errors
+                last = f"could not load the flashloader into RAM: {e}"
+            if time.monotonic() > deadline:
+                raise FlashStoreError(last)
+            time.sleep(0.5)
         _wait_for(FLASHLOADER_ID, "the NXP RAM flashloader", timeout)
 
     interfaces = MbootUSBInterface.scan(device_id=f"0x{FLASHLOADER_ID[0]:04x},0x{FLASHLOADER_ID[1]:04x}",

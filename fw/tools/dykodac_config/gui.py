@@ -1072,27 +1072,31 @@ class MainWindow(QMainWindow):
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(dlg.setLabelText)
-
-        def done(seq, err):
-            self._thread.quit()
-            dlg.close()
-            self._busy = False
-            ok = self._connect()
-            if err:
-                if "flashloader.bin not found" in err:
-                    self._ask_flashloader()
-                QMessageBox.critical(self, APP_NAME, f"Save failed:\n{err}\n\nThe previously saved settings "
-                                     "are intact. If the DAC stays silent, unplug and replug it.")
-                return
-            if ok and self.info and self.info.flash_sequence == seq and \
-                    self.device_settings and self.device_settings.pack() == settings.pack():
-                self.statusBar().showMessage(f"Saved to flash (record #{seq}) and verified after reboot.", 8000)
-            else:
-                QMessageBox.warning(self, APP_NAME, "The DAC rebooted but is not reporting the saved record. "
-                                    "Press Read and check, then Save again.")
-
-        self._worker.finished.connect(done)
+        # Bound slot of a GUI-thread QObject => queued into the GUI thread. A plain
+        # closure would run in the worker thread and deadlock on the widget calls.
+        self._save_dialog, self._saving = dlg, settings
+        self._worker.finished.connect(self._save_done)
         self._thread.start()
+
+    def _save_done(self, seq: int, err: str):
+        dlg, settings = self._save_dialog, self._saving
+        self._thread.quit()
+        self._thread.wait()
+        dlg.close()
+        self._busy = False
+        ok = self._connect()
+        if err:
+            if "flashloader.bin not found" in err:
+                self._ask_flashloader()
+            QMessageBox.critical(self, APP_NAME, f"Save failed:\n{err}\n\nThe previously saved settings "
+                                 "are intact. If the DAC stays silent, unplug and replug it.")
+            return
+        if ok and self.info and self.info.flash_sequence == seq and \
+                self.device_settings and self.device_settings.pack() == settings.pack():
+            self.statusBar().showMessage(f"Saved to flash (record #{seq}) and verified after reboot.", 8000)
+        else:
+            QMessageBox.warning(self, APP_NAME, "The DAC rebooted but is not reporting the saved record. "
+                                "Press Read and check, then Save again.")
 
     def _ask_flashloader(self):
         path, _ = QFileDialog.getOpenFileName(self, "Locate NXP RT1010 ivt_flashloader.bin", "",
