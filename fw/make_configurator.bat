@@ -23,7 +23,7 @@ if exist "tools\flashloader\ivt_flashloader.bin" set "DYKO_LOADER=--add-data too
 
 pushd tools
 "..\%DYKO_PY%" -m PyInstaller --noconfirm --clean --onefile --windowed --name DykoDAC2-Configurator ^
-    --collect-all spsdk --collect-submodules hid --exclude-module tkinter --exclude-module matplotlib ^
+    --collect-all spsdk --collect-binaries libusbsio --collect-submodules hid --exclude-module tkinter --exclude-module matplotlib ^
     %DYKO_LOADER:tools\=..\tools\% ^
     dykodac_configurator.py
 if errorlevel 1 (popd & goto :failed)
