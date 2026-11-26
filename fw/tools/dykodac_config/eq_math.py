@@ -163,6 +163,43 @@ class Chain:
             boost = 10 ** (p.MAX_TRANSIENT_BOOST_DB * s.transient_amount_pct / 100 / 20) - 1
             self.transient = (hp, boost)
             self.centres.append(float(s.transient_crossover_hz))
+        # Space stage (mid/side): width extra side gain e in [0, E] on a
+        # first-order 300 Hz high-pass, front cue peaks on mid and side.
+        self.width = None
+        if s.width_enabled:
+            k = math.tan(math.pi * p.WIDTH_SPLIT_HZ / fs)
+            b0, d1 = 1 / (1 + k), (1 - k) / (1 + k)
+            extra = 10 ** (p.MAX_WIDTH_BOOST_DB * s.width_amount_pct / 100 / 20) - 1
+            self.width = (b0, d1, extra)
+        self.front = None
+        if s.front_enabled:
+            a = s.front_amount_pct / 100
+            mid = design_band(p.EqBand(type=p.FILTER_PEAKING, channels=p.CH_BOTH, frequency_hz=p.FRONT_MID_HZ,
+                                       gain_db=-p.MAX_FRONT_MID_CUT_DB * a, q=p.FRONT_MID_Q), fs)
+            side = design_band(p.EqBand(type=p.FILTER_PEAKING, channels=p.CH_BOTH, frequency_hz=p.FRONT_SIDE_HZ,
+                                        gain_db=p.MAX_FRONT_SIDE_BOOST_DB * a, q=p.FRONT_SIDE_Q), fs)
+            self.front = (mid, side)
+            self.centres += [p.FRONT_SIDE_HZ, p.FRONT_MID_HZ]
+
+    def _space_bound(self, w: float) -> float:
+        """Mirror of space_bound(): (|Hm + Hs A| + |Hm - Hs A|) / 2, A = 1 + e H_hp."""
+        if not self.width and not self.front:
+            return 1.0
+        zi = cmath.exp(-1j * w)
+
+        def resp(c):
+            b0, b1, b2, a1, a2 = c
+            return (b0 + b1 * zi + b2 * zi * zi) / (1 + a1 * zi + a2 * zi * zi)
+        hm, hs = (resp(self.front[0]), resp(self.front[1])) if self.front else (1.0, 1.0)
+        hp, extra = 0.0, 0.0
+        if self.width:
+            b0, d1, extra = self.width
+            hp = b0 * (1 - zi) / (1 - d1 * zi)
+        bound = 0.0
+        for e in (0.0, extra):
+            side = hs * (1 + e * hp)
+            bound = max(bound, 0.5 * (abs(hm + side) + abs(hm - side)))
+        return bound
 
     def _transient_bound(self, w: float) -> float:
         if not self.transient:
@@ -186,17 +223,20 @@ class Chain:
         w = 2 * math.pi * f / self.fs
         el = 10 ** (self.eq_db(f, True) / 20)
         er = 10 ** (self.eq_db(f, False) / 20)
+        if self.width or self.front:  # the space stage mixes the channels
+            el = er = max(el, er)
         ol, orr = el, er
         if self.xf:
             pairs = [(abs(d), abs(c)) for d, c in self.xf(w)]
             ol = max(hi * el + lo * er for hi, lo in pairs)
             orr = max(hi * er + lo * el for hi, lo in pairs)
-        t = self._transient_bound(w)
+        t = self._transient_bound(w) * self._space_bound(w)
         return max(ol * self.trim_l * t, orr * self.trim_r * t)
 
     def boost_db(self) -> float:
         """Same grid, centres and 0.1 dB margin as the firmware."""
-        if not self.left and not self.right and not self.xf and not self.transient:
+        if not self.left and not self.right and not self.xf and not self.transient \
+                and not self.width and not self.front:
             return 0.0
         top, n = 0.499 * self.fs, 192
         ratio = (top / 10.0) ** (1 / (n - 1))

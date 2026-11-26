@@ -498,6 +498,44 @@ class MainWindow(QMainWindow):
         tr.addStretch()
         gf.addRow("Transients", tr)
         lv.addWidget(g)
+
+        g = QGroupBox("Space  (any stereo music)")
+        gf = QFormLayout(g)
+        wd = QHBoxLayout()
+        self.cb_width = QCheckBox("On")
+        self.cb_width.setToolTip(
+            "Width expander: turns up the side (L - R) signal above 300 Hz, more the wider the\n"
+            "sound already is. Reverb, room sound and hard-panned parts open up; a near-mono\n"
+            "centre (vocals, bass) is left almost alone, so the image does not get hollow.\n"
+            "Works with any crossfeed. The boost is covered by the automatic headroom.")
+        self.s_width_amount = QSpinBox(minimum=p.MIN_DETAIL_AMOUNT, maximum=p.MAX_DETAIL_AMOUNT,
+                                       singleStep=10, suffix=" %")
+        self.s_width_amount.setToolTip(
+            f"100 % = up to +{p.MAX_WIDTH_BOOST_DB:g} dB side gain for fully wide sound\n"
+            "(about half of that on typical mixes).")
+        wd.addWidget(self.cb_width)
+        wd.addWidget(QLabel("amount"))
+        wd.addWidget(self.s_width_amount)
+        wd.addStretch()
+        gf.addRow("Width", wd)
+        fc = QHBoxLayout()
+        self.cb_front = QCheckBox("On")
+        self.cb_front.setToolTip(
+            "Front cue: a mid/side tone shape that mimics how the outer ear colours sound from the\n"
+            f"front: a dip near {p.FRONT_MID_HZ / 1000:g} kHz on the centre and a broad lift near "
+            f"{p.FRONT_SIDE_HZ / 1000:g} kHz on the sides.\n"
+            "It pulls the centre image forward, out of the head. Left/right-only sound is barely\n"
+            "changed in tone. Pairs well with Natural, virtual speakers or Spacious crossfeed.")
+        self.s_front_amount = QSpinBox(minimum=p.MIN_DETAIL_AMOUNT, maximum=p.MAX_DETAIL_AMOUNT,
+                                       singleStep=10, suffix=" %")
+        self.s_front_amount.setToolTip(
+            f"100 % = -{p.MAX_FRONT_MID_CUT_DB:g} dB centre dip and +{p.MAX_FRONT_SIDE_BOOST_DB:g} dB side lift.")
+        fc.addWidget(self.cb_front)
+        fc.addWidget(QLabel("amount"))
+        fc.addWidget(self.s_front_amount)
+        fc.addStretch()
+        gf.addRow("Front cue", fc)
+        lv.addWidget(g)
         lv.addStretch()
         split.addWidget(left)
 
@@ -585,8 +623,11 @@ class MainWindow(QMainWindow):
         self.cb_loud.toggled.connect(self._changed)
         self.cb_prox.toggled.connect(self._changed)
         self.cb_tr.toggled.connect(self._changed)
+        self.cb_width.toggled.connect(self._changed)
+        self.cb_front.toggled.connect(self._changed)
         for w in (self.s_lev_target, self.s_lev_cut, self.s_loud_ref, self.s_loud_amount, self.s_loud_boost,
-                  self.s_prox_amount, self.s_tr_amount, self.s_tr_xover):
+                  self.s_prox_amount, self.s_tr_amount, self.s_tr_xover, self.s_width_amount,
+                  self.s_front_amount):
             w.valueChanged.connect(self._changed)
         self.c_headroom.currentIndexChanged.connect(self._headroom_preset)
         self.s_headroom.valueChanged.connect(self._changed)
@@ -787,6 +828,10 @@ class MainWindow(QMainWindow):
             self.cb_tr.setChecked(s.transient_enabled)
             self.s_tr_amount.setValue(int(s.transient_amount_pct))
             self.s_tr_xover.setValue(int(s.transient_crossover_hz))
+            self.cb_width.setChecked(s.width_enabled)
+            self.s_width_amount.setValue(int(s.width_amount_pct))
+            self.cb_front.setChecked(s.front_enabled)
+            self.s_front_amount.setValue(int(s.front_amount_pct))
             self.cb_eq.setChecked(s.eq_enabled)
             for (t, ch, fr, ga, q), b in zip(self.band_widgets, s.bands):
                 t.setCurrentIndex(b.type)
@@ -821,6 +866,10 @@ class MainWindow(QMainWindow):
         s.transient_enabled = self.cb_tr.isChecked()
         s.transient_amount_pct = self.s_tr_amount.value()
         s.transient_crossover_hz = self.s_tr_xover.value()
+        s.width_enabled = self.cb_width.isChecked()
+        s.width_amount_pct = self.s_width_amount.value()
+        s.front_enabled = self.cb_front.isChecked()
+        s.front_amount_pct = self.s_front_amount.value()
         s.eq_enabled = self.cb_eq.isChecked()
         s.bands = []
         for t, ch, fr, ga, q in self.band_widgets:
@@ -880,7 +929,7 @@ class MainWindow(QMainWindow):
         self._sync_preset_combo()
         eff = s.headroom_db - boost
         txt = (f"Effective headroom: <b>{eff:+.2f} dB</b>"
-               f" = {s.headroom_db:+.2f} dB set − {boost:.2f} dB EQ/crossfeed/transient boost (automatic)")
+               f" = {s.headroom_db:+.2f} dB set − {boost:.2f} dB EQ/crossfeed/detail/space boost (automatic)")
         if s.headroom_db == 0 and boost == 0:
             txt += f"<br><span style='color:{WARN}'>0 dB: inter-sample peaks of loud masters will clip.</span>"
         self.l_effective.setText(txt)
@@ -896,6 +945,8 @@ class MainWindow(QMainWindow):
         self.s_prox_amount.setEnabled(s.proximity_enabled)
         for w in (self.s_tr_amount, self.s_tr_xover):
             w.setEnabled(s.transient_enabled)
+        self.s_width_amount.setEnabled(s.width_enabled)
+        self.s_front_amount.setEnabled(s.front_enabled)
         self._render_loudness()
         for i, (t, ch, fr, ga, q) in enumerate(self.band_widgets):
             active = t.currentIndex() != p.FILTER_OFF

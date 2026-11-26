@@ -10,6 +10,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace settings {
 
@@ -48,7 +49,9 @@ inline constexpr std::uint8_t channel_right = 0x02U;
 inline constexpr std::uint8_t channel_both = 0x03U;
 inline constexpr std::uint8_t detail_proximity = 0x01U;
 inline constexpr std::uint8_t detail_transient = 0x02U;
-inline constexpr std::uint8_t detail_all = 0x03U;
+inline constexpr std::uint8_t detail_width = 0x04U;
+inline constexpr std::uint8_t detail_front = 0x08U;
+inline constexpr std::uint8_t detail_all = 0x0FU;
 
 struct EqBand {
     std::uint8_t type{static_cast<std::uint8_t>(FilterType::Off)};
@@ -76,8 +79,9 @@ struct Settings {
     // > 0 attenuates the left channel, < 0 attenuates the right channel.
     std::int16_t balance_db_8_8{0};
     std::uint8_t invert_polarity{0U}; // channel_left / channel_right bits
-    // Detail stage (audio/source_dsp.hpp): detail_proximity / detail_transient
-    // bits. Its other fields are only checked while the part is on.
+    // Detail stage (audio/source_dsp.hpp): detail_proximity / _transient /
+    // _width / _front bits. Its other fields are only checked while the
+    // part is on.
     std::uint8_t detail_flags{0U};
     // Loudness leveler (cut-only AGC on BS.1770 K-weighted loudness of the
     // input). Its other fields are only checked while it is on.
@@ -97,8 +101,16 @@ struct Settings {
     std::uint8_t transient_amount_pct{50U};
     std::uint8_t transient_crossover_100hz{25U}; // 2.5 kHz
     std::array<EqBand, eq_band_count> bands{};
+    // ---- appended in the 200-byte layout (legacy records are 192 bytes) ----
+    // Width expander: side boost above 300 Hz that grows with the side/mid
+    // ratio, 100 % = maximum_width_boost_db for fully wide sound.
+    std::uint8_t width_amount_pct{50U};
+    // Front cue: mid/side spectral cue that pulls the centre image forward,
+    // 100 % = maximum_front_mid_cut_db / maximum_front_side_boost_db.
+    std::uint8_t front_amount_pct{50U};
+    std::array<std::uint8_t, 6> reserved{};
 };
-static_assert(sizeof(Settings) == 192U, "settings wire layout changed");
+static_assert(sizeof(Settings) == 200U, "settings wire layout changed");
 static_assert(offsetof(Settings, upsampler_mode) == 8U);
 static_assert(offsetof(Settings, headroom_db_8_8) == 12U);
 static_assert(offsetof(Settings, balance_db_8_8) == 16U);
@@ -108,6 +120,9 @@ static_assert(offsetof(Settings, loudness_reference_db_8_8) == 26U);
 static_assert(offsetof(Settings, detail_flags) == 19U);
 static_assert(offsetof(Settings, proximity_amount_pct) == 29U);
 static_assert(offsetof(Settings, bands) == 32U);
+static_assert(offsetof(Settings, width_amount_pct) == 192U);
+// Size of the original layout (up to and including the EQ bands).
+inline constexpr std::size_t legacy_size = 192U;
 
 // Accepted ranges. Values outside are rejected by validate() rather than
 // clamped so the host always sees exactly what the DAC runs.
@@ -133,6 +148,9 @@ inline constexpr std::uint8_t maximum_detail_amount_pct = 100U;
 inline constexpr std::uint8_t minimum_transient_crossover_100hz = 10U; // 1 kHz
 inline constexpr std::uint8_t maximum_transient_crossover_100hz = 80U; // 8 kHz
 inline constexpr float maximum_transient_boost_db = 10.0F;
+inline constexpr float maximum_width_boost_db = 6.0F;
+inline constexpr float maximum_front_mid_cut_db = 6.0F;    // at 8 kHz
+inline constexpr float maximum_front_side_boost_db = 3.0F; // at 3 kHz
 
 inline Settings defaults() noexcept {
     Settings s{};
@@ -143,7 +161,7 @@ inline Settings defaults() noexcept {
 enum class Invalid : std::uint8_t {
     None = 0U, Header, UpsamplerMode, DacFilter, Crossfeed, Headroom, DacCeiling,
     Balance, Polarity, Reserved, BandType, BandChannels, BandFrequency, BandGain, BandQ,
-    Leveler, Loudness, Proximity, Transient,
+    Leveler, Loudness, Proximity, Transient, Width, Front,
 };
 
 inline Invalid validate(const Settings& s) noexcept {
@@ -185,6 +203,10 @@ inline Invalid validate(const Settings& s) noexcept {
          s.transient_crossover_100hz < minimum_transient_crossover_100hz ||
          s.transient_crossover_100hz > maximum_transient_crossover_100hz))
         return Invalid::Transient;
+    if ((s.detail_flags & detail_width) != 0U && !amount_ok(s.width_amount_pct)) return Invalid::Width;
+    if ((s.detail_flags & detail_front) != 0U && !amount_ok(s.front_amount_pct)) return Invalid::Front;
+    for (const auto byte : s.reserved)
+        if (byte != 0U) return Invalid::Reserved;
     for (const auto& band : s.bands) {
         if (band.type >= filter_type_count) return Invalid::BandType;
         if (band.reserved != 0U) return Invalid::Reserved;
@@ -222,6 +244,22 @@ inline void upgrade(Settings& s) noexcept {
         s.transient_amount_pct = d.transient_amount_pct;
         s.transient_crossover_100hz = d.transient_crossover_100hz;
     }
+    if ((s.detail_flags & (detail_width | detail_front)) == 0U && s.width_amount_pct == 0U &&
+        s.front_amount_pct == 0U) {
+        s.width_amount_pct = d.width_amount_pct;
+        s.front_amount_pct = d.front_amount_pct;
+    }
+}
+
+// Reads a stored record of the current or the legacy (192-byte) layout.
+// The fields a legacy record lacks become zero (off) and upgrade() then
+// gives them their defaults. False for any other length.
+inline bool from_record(Settings& out, const void* data, std::size_t length) noexcept {
+    if (length != sizeof(Settings) && length != legacy_size) return false;
+    std::memset(static_cast<void*>(&out), 0, sizeof(out));
+    std::memcpy(&out, data, length);
+    if (length == legacy_size && out.size == legacy_size) out.size = static_cast<std::uint16_t>(sizeof(Settings));
+    return true;
 }
 
 // CRC-32 (IEEE 802.3, reflected, init/xorout 0xFFFFFFFF) for the flash record.

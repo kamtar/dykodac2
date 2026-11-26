@@ -45,6 +45,19 @@
 //    added again, up to the maximum boost at a 6 dB lead. The boost bound
 //    max(1, |1 + G H_hp|) is part of the headroom analysis.
 //
+// Behind it, still in front of the crossfeed, the space stage works on mid
+// M = (L + R) / 2 and side S = (L - R) / 2 (meant for any stereo music):
+//  - The width expander adds e x HP(S) back to the side (first-order
+//    high-pass at 300 Hz, so the bass stays centred), with
+//    e = E p_s / (p_s + 0.1 p_m) from the smoothed high-passed side and mid
+//    powers: wide passages (reverb, hard-panned parts) open up, a
+//    near-mono centre gets almost nothing. Up to +6 dB side gain at 100 %.
+//  - The front cue is a fixed mid/side EQ: a dip near 8 kHz on the mid
+//    and a broad lift near 3 kHz on the side, the spectral cues of a
+//    frontal source, so the centre image moves forward out of the head.
+//  Both mix L and R; the headroom analysis bounds them per frequency by
+//  (|Hm + Hs A| + |Hm - Hs A|) / 2 with A = 1 + e H_hp over the range of e.
+//
 // Live changes are click-free: set_design() glides every parameter (band
 // tuning and mix, trims, crossfeed amount) linearly to the new design over
 // ramp_seconds. Bands that appear or disappear fade from or to unity.
@@ -179,6 +192,25 @@ struct TransientDesign {
     float floor{0.0F};       // power floor of the lead ratio (no boost from hiss)
 };
 
+struct WidthDesign {
+    bool enabled{false};
+    FirstOrder highpass{};   // bilinear one-pole high-pass (side and detector)
+    Biquad highpass_biquad{}; // the same as a biquad, for analysis
+    float envelope{0.0F};    // per-frame smoothing of the side and mid powers
+    float glide{0.0F};       // per-block smoothing of the extra side gain e
+    float extra{0.0F};       // E: largest extra side gain, 10^(dB/20) - 1
+    float pivot{0.0F};       // mid power weight: e = E/2 at p_s = pivot p_m
+    float floor_power{0.0F}; // added to the denominator: silence stays neutral
+};
+
+struct FrontDesign {
+    bool enabled{false};
+    Biquad mid{};         // analysis forms
+    Biquad side{};
+    SvfParams mid_svf{};  // runtime forms
+    SvfParams side_svf{};
+};
+
 struct SourceDspDesign {
     std::uint32_t sample_rate_hz{0U};
     // Slot i of each channel is band i; inactive slots are skipped.
@@ -205,6 +237,8 @@ struct SourceDspDesign {
     LevelerDesign leveler{};
     ProximityDesign proximity{};
     TransientDesign transient{};
+    WidthDesign width{};
+    FrontDesign front{};
     bool identity{true};
 };
 
@@ -256,6 +290,8 @@ public:
     // and the transient shaper's current boost per channel (dB).
     float proximity_gain(std::size_t i) const noexcept { return px_gain_[i]; }
     float transient_boost_db(std::size_t channel) const noexcept;
+    // Width expander: current side gain above the split (dB >= 0).
+    float width_boost_db() const noexcept;
 
     inline void process(float& left, float& right) noexcept {
         if (idle_) return;
@@ -273,6 +309,7 @@ public:
             l = transient(0U, l);
             r = transient(1U, r);
         }
+        if (wd_active_ || fc_active_) space(l, r);
         if (xf_active_ && xf_.mid_side) {
             if (xf_.adaptive) correlation_meter(l, r);
             const float m = 0.5F * (l + r);
@@ -408,6 +445,28 @@ private:
         tr_lead_[ch] = lead;
         return x + (tr_wet_ * c.boost * lead) * h;
     }
+    inline void space(float& l, float& r) noexcept {
+        float m = 0.5F * (l + r);
+        float s = 0.5F * (l - r);
+        if (wd_active_) {
+            const auto& c = wd_;
+            const float hs = first_order(c.highpass, s, wd_x1_[0], wd_y1_[0]);
+            const float hm = first_order(c.highpass, m, wd_x1_[1], wd_y1_[1]);
+            wd_power_[0] += (hs * hs - wd_power_[0]) * c.envelope;
+            wd_power_[1] += (hm * hm - wd_power_[1]) * c.envelope;
+            wd_extra_ += wd_step_;
+            s += wd_extra_ * hs;
+            if (++wd_fill_ == ramp_block_frames) end_width_block();
+        }
+        if (fc_active_) {
+            m = run(fc_mid_, m);
+            s = run(fc_side_, s);
+        }
+        l = m + s;
+        r = m - s;
+    }
+    void end_width_block() noexcept;
+    void clear_width_state() noexcept;
     void clear_detail_state() noexcept;
     void clear_detail_state_proximity() noexcept;
     void clear_detail_state_transient() noexcept;
@@ -503,6 +562,19 @@ private:
     float tr_fast_[2]{};
     float tr_slow_[2]{};
     float tr_lead_[2]{};
+    // Space stage. The width expander fades by its target (e glides to 0),
+    // the front cue by gliding its two SVFs to and from unity.
+    WidthDesign wd_{};
+    bool wd_active_{false};
+    float wd_x1_[2]{};
+    float wd_y1_[2]{};
+    float wd_power_[2]{};
+    float wd_extra_{0.0F};
+    float wd_step_{0.0F};
+    std::uint32_t wd_fill_{0U};
+    bool fc_active_{false};
+    Band fc_mid_{};
+    Band fc_side_{};
     // Leveler. The loudness estimate and gain survive stream restarts and
     // redesigns; only the meter filters restart.
     LevelerDesign lev_{};

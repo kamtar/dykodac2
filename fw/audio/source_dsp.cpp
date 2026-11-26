@@ -268,6 +268,15 @@ constexpr double transient_fast_s = 0.001;
 constexpr double transient_slow_attack_s = 0.015;
 constexpr double transient_slow_release_s = 0.020;
 constexpr double transient_floor_dbfs = -70.0;
+constexpr double width_split_hz = 300.0;
+constexpr double width_envelope_s = 0.050;
+constexpr double width_glide_s = 0.030;
+constexpr double width_pivot_db = -10.0; // side re mid where half the boost applies
+constexpr double width_floor_dbfs = -65.0;
+constexpr float front_mid_hz = 8'000.0F;
+constexpr float front_mid_q = 2.0F;
+constexpr float front_side_hz = 3'000.0F;
+constexpr float front_side_q = 0.8F;
 
 float smoothing(double seconds, std::uint32_t rate) noexcept {
     return static_cast<float>(1.0 - std::exp(-1.0 / (seconds * rate)));
@@ -309,6 +318,64 @@ TransientDesign design_transient(const settings::Settings& s, std::uint32_t rate
     return t;
 }
 
+WidthDesign design_width(const settings::Settings& s, std::uint32_t rate) noexcept {
+    WidthDesign w{};
+    w.enabled = (s.detail_flags & settings::detail_width) != 0U;
+    if (!w.enabled) return w;
+    const double k = std::tan(pi * width_split_hz / rate);
+    const auto b0 = static_cast<float>(1.0 / (1.0 + k));
+    const auto d1 = static_cast<float>((1.0 - k) / (1.0 + k));
+    w.highpass = {b0, -b0, d1};
+    w.highpass_biquad = {b0, -b0, 0.0F, -d1, 0.0F};
+    w.envelope = smoothing(width_envelope_s, rate);
+    w.glide = smoothing(width_glide_s, rate / SourceDsp::ramp_block_frames);
+    const double db = settings::maximum_width_boost_db * s.width_amount_pct / 100.0;
+    w.extra = static_cast<float>(std::pow(10.0, db / 20.0) - 1.0);
+    w.pivot = static_cast<float>(std::pow(10.0, width_pivot_db / 10.0));
+    const double floor = full_scale * std::pow(10.0, width_floor_dbfs / 20.0);
+    w.floor_power = static_cast<float>(floor * floor);
+    return w;
+}
+
+FrontDesign design_front(const settings::Settings& s, std::uint32_t rate) noexcept {
+    FrontDesign f{};
+    f.enabled = (s.detail_flags & settings::detail_front) != 0U;
+    if (!f.enabled) return f;
+    const float amount = static_cast<float>(s.front_amount_pct) / 100.0F;
+    const auto peak = static_cast<std::uint8_t>(settings::FilterType::Peaking);
+    const settings::EqBand mid{peak, settings::channel_both, 0U, front_mid_hz,
+                               -settings::maximum_front_mid_cut_db * amount, front_mid_q};
+    const settings::EqBand side{peak, settings::channel_both, 0U, front_side_hz,
+                                settings::maximum_front_side_boost_db * amount, front_side_q};
+    f.mid = design_band(mid, rate);
+    f.side = design_band(side, rate);
+    f.mid_svf = design_band_svf(mid, rate);
+    f.side_svf = design_band_svf(side, rate);
+    return f;
+}
+
+std::complex<double> biquad_response(const Biquad& c, std::complex<double> zi) noexcept {
+    return (static_cast<double>(c.b0) + static_cast<double>(c.b1) * zi + static_cast<double>(c.b2) * zi * zi) /
+           (1.0 + static_cast<double>(c.a1) * zi + static_cast<double>(c.a2) * zi * zi);
+}
+
+// Largest gain of the space stage at w for any L, R of magnitude <= 1:
+// L' = Hm M + Hs A S = L (Hm + Hs A) / 2 + R (Hm - Hs A) / 2 with
+// A = 1 + e H_hp, e in [0, E]; the sum is convex in e, so the ends bound it.
+float space_bound(const WidthDesign& wd, const FrontDesign& fc, float w) noexcept {
+    if (!wd.enabled && !fc.enabled) return 1.0F;
+    const std::complex<double> zi = std::polar(1.0, -static_cast<double>(w));
+    const std::complex<double> hm = fc.enabled ? biquad_response(fc.mid, zi) : 1.0;
+    const std::complex<double> hs = fc.enabled ? biquad_response(fc.side, zi) : 1.0;
+    const std::complex<double> hp = wd.enabled ? biquad_response(wd.highpass_biquad, zi) : 0.0;
+    double bound = 0.0;
+    for (const double e : {0.0, static_cast<double>(wd.extra)}) {
+        const std::complex<double> side = hs * (1.0 + e * hp);
+        bound = std::fmax(bound, 0.5 * (std::abs(hm + side) + std::abs(hm - side)));
+    }
+    return static_cast<float>(bound);
+}
+
 // Largest gain of the transient shaper at w: x + b G H_hp(x) for b in
 // [0, 1]; |1 + b G H| is convex in b, so the ends bound it.
 float transient_bound(const TransientDesign& t, float w) noexcept {
@@ -325,7 +392,7 @@ float transient_bound(const TransientDesign& t, float w) noexcept {
 void refresh_identity(SourceDspDesign& d) noexcept {
     d.identity = d.left_mask == 0U && d.right_mask == 0U && !d.crossfeed.enabled &&
                  d.trim_left == 1.0F && d.trim_right == 1.0F && d.makeup == 1.0F && !d.leveler.enabled &&
-                 !d.proximity.enabled && !d.transient.enabled;
+                 !d.proximity.enabled && !d.transient.enabled && !d.width.enabled && !d.front.enabled;
 }
 
 float chain_magnitude(const SourceDspDesign& d, bool left, float w) noexcept {
@@ -341,8 +408,14 @@ float worst_case_magnitude(const SourceDspDesign& d, float frequency_hz) noexcep
     const float w = 2.0F * static_cast<float>(pi) * frequency_hz / static_cast<float>(d.sample_rate_hz);
     const float eq_left = chain_magnitude(d, true, w);
     const float eq_right = chain_magnitude(d, false, w);
-    float out_left = eq_left;
-    float out_right = eq_right;
+    // The space stage mixes the channels: bound both by the louder one.
+    const float space = space_bound(d.width, d.front, w);
+    const bool mixed = d.width.enabled || d.front.enabled;
+    const float eq_max = eq_left > eq_right ? eq_left : eq_right;
+    const float in_left = mixed ? eq_max : eq_left;
+    const float in_right = mixed ? eq_max : eq_right;
+    float out_left = in_left;
+    float out_right = in_right;
     if (d.crossfeed.enabled) {
         // Upper bound: both paths in phase with fully correlated channels.
         // An adaptive amount moves the side response along a line, and
@@ -354,14 +427,14 @@ float worst_case_magnitude(const SourceDspDesign& d, float frequency_hz) noexcep
             crossfeed_response(c, static_cast<double>(w), amount, direct, cross);
             const auto hi = static_cast<float>(std::abs(direct));
             const auto lo = static_cast<float>(std::abs(cross));
-            out_left = std::fmax(out_left, hi * eq_left + lo * eq_right);
-            out_right = std::fmax(out_right, hi * eq_right + lo * eq_left);
+            out_left = std::fmax(out_left, hi * in_left + lo * in_right);
+            out_right = std::fmax(out_right, hi * in_right + lo * in_left);
         }
     }
     // The detail stage runs per channel in front of the crossfeed; the
     // proximity part never amplifies, and the transient bound is the same
     // for both channels, so it factors out.
-    const float detail = transient_bound(d.transient, w);
+    const float detail = transient_bound(d.transient, w) * space;
     out_left *= std::fabs(d.trim_left) * detail;
     out_right *= std::fabs(d.trim_right) * detail;
     return out_left > out_right ? out_left : out_right;
@@ -498,11 +571,13 @@ SourceDspDesign design_source_dsp(const settings::Settings& s, std::uint32_t sam
     d.leveler = design_leveler(s, sample_rate_hz);
     d.proximity = design_proximity(s, sample_rate_hz);
     d.transient = design_transient(s, sample_rate_hz);
+    d.width = design_width(s, sample_rate_hz);
+    d.front = design_front(s, sample_rate_hz);
     // The boost analysis covers the user chain only (EQ, crossfeed, trims);
     // the leveler only cuts and the loudness slots are bounded by the host
     // attenuation (see apply_loudness_compensation()).
     if (d.left_mask == 0U && d.right_mask == 0U && !d.crossfeed.enabled && !d.transient.enabled &&
-        d.trim_left == 1.0F && d.trim_right == 1.0F) {
+        !d.width.enabled && !d.front.enabled && d.trim_left == 1.0F && d.trim_right == 1.0F) {
         refresh_identity(d);
         return d;
     }
@@ -519,6 +594,13 @@ SourceDspDesign design_source_dsp(const settings::Settings& s, std::uint32_t sam
         // The peak of |1 + G H_hp| sits near the crossover.
         const float m = worst_case_magnitude(d, 100.0F * static_cast<float>(s.transient_crossover_100hz));
         if (m > peak) peak = m;
+    }
+    if (d.front.enabled) {
+        for (const float fc : {front_side_hz, front_mid_hz}) {
+            if (fc >= top) continue;
+            const float m = worst_case_magnitude(d, fc);
+            if (m > peak) peak = m;
+        }
     }
     for (const auto& band : s.bands) {
         if (s.eq_enabled == 0U || band_is_neutral(band)) continue;
@@ -620,6 +702,18 @@ void SourceDsp::snap() noexcept {
     tr_active_ = tr_.enabled;
     tr_wet_ = tr_wet_from_ = tr_wet_to_ = tr_.enabled ? 1.0F : 0.0F;
     clear_detail_state();
+    wd_ = design_.width;
+    wd_active_ = wd_.enabled;
+    clear_width_state();
+    fc_active_ = design_.front.enabled;
+    fc_mid_ = {};
+    fc_side_ = {};
+    if (fc_active_) {
+        fc_mid_.p = fc_mid_.from = fc_mid_.to = design_.front.mid_svf;
+        fc_side_.p = fc_side_.from = fc_side_.to = design_.front.side_svf;
+        update_coefficients(fc_mid_);
+        update_coefficients(fc_side_);
+    }
     ramp_steps_total_ = ramp_steps_left_ = ramp_phase_ = 0U;
     adopt_leveler(design_.leveler, true);
     update_idle();
@@ -715,6 +809,42 @@ void SourceDsp::set_design(const SourceDspDesign& design) noexcept {
     }
     tr_wet_from_ = tr_wet_;
     tr_wet_to_ = tr.enabled ? 1.0F : 0.0F;
+    // Width: a new amount takes over at once (e glides there); switched
+    // off, e glides to 0 and end_width_block() retires it.
+    if (design.width.enabled) {
+        if (!wd_active_) {
+            wd_active_ = true;
+            wd_ = design.width;
+            clear_width_state();
+        } else {
+            wd_ = design.width;
+        }
+    } else if (wd_active_) {
+        wd_.enabled = false;
+    }
+    // Front cue: its two SVFs glide like EQ bands, from and to unity.
+    const auto& fc = design.front;
+    auto unity = [](const SvfParams& p) { return SvfParams{p.g, p.k, 1.0F, 0.0F, 0.0F}; };
+    if (fc.enabled) {
+        if (!fc_active_) {
+            fc_active_ = true;
+            fc_mid_ = {};
+            fc_side_ = {};
+            fc_mid_.p = unity(fc.mid_svf);
+            fc_side_.p = unity(fc.side_svf);
+            update_coefficients(fc_mid_);
+            update_coefficients(fc_side_);
+        }
+        fc_mid_.from = fc_mid_.p;
+        fc_side_.from = fc_side_.p;
+        fc_mid_.to = fc.mid_svf;
+        fc_side_.to = fc.side_svf;
+    } else if (fc_active_) {
+        fc_mid_.from = fc_mid_.p;
+        fc_side_.from = fc_side_.p;
+        fc_mid_.to = unity(fc_mid_.p);
+        fc_side_.to = unity(fc_side_.p);
+    }
     adopt_leveler(design.leveler, false);
 
     const float steps = ramp_seconds * static_cast<float>(design.sample_rate_hz) /
@@ -747,6 +877,10 @@ void SourceDsp::advance_ramp() noexcept {
     trim_right_ = lerp(trim_right_from_, trim_right_to_);
     xf_wet_ = lerp(xf_wet_from_, xf_wet_to_);
     tr_wet_ = lerp(tr_wet_from_, tr_wet_to_);
+    if (fc_active_) {
+        glide(fc_mid_);
+        glide(fc_side_);
+    }
     if (ramp_steps_left_ != 0U) return;
 
     // Glide finished: land exactly on the design and drop faded-out parts.
@@ -765,6 +899,11 @@ void SourceDsp::advance_ramp() noexcept {
         tr_ = {};
         clear_detail_state_transient();
     }
+    if (!design_.front.enabled && fc_active_) {
+        fc_active_ = false;
+        fc_mid_ = {};
+        fc_side_ = {};
+    }
     if (!design_.crossfeed.enabled) {
         xf_active_ = false;
         xf_ = {};
@@ -779,6 +918,8 @@ void SourceDsp::advance_ramp() noexcept {
             left_[i].from = left_[i].to;
             right_[i].from = right_[i].to;
         }
+        fc_mid_.from = fc_mid_.to;
+        fc_side_.from = fc_side_.to;
         trim_left_from_ = trim_left_to_;
         trim_right_from_ = trim_right_to_;
         xf_wet_ = xf_wet_from_ = 0.0F;
@@ -922,6 +1063,36 @@ void SourceDsp::end_proximity_block() noexcept {
     }
 }
 
+void SourceDsp::clear_width_state() noexcept {
+    wd_x1_[0] = wd_x1_[1] = wd_y1_[0] = wd_y1_[1] = 0.0F;
+    wd_power_[0] = wd_power_[1] = 0.0F;
+    wd_extra_ = wd_step_ = 0.0F;
+    wd_fill_ = 0U;
+}
+
+// Width, every 16 frames: the extra side gain follows E x p_s / (p_s +
+// pivot p_m), smoothed per block and stepped per frame across the block.
+void SourceDsp::end_width_block() noexcept {
+    wd_fill_ = 0U;
+    const auto& c = wd_;
+    constexpr float inv = 1.0F / static_cast<float>(ramp_block_frames);
+    float target = 0.0F;
+    if (c.enabled) target = c.extra * wd_power_[0] / (wd_power_[0] + c.pivot * wd_power_[1] + c.floor_power);
+    const float next = wd_extra_ + (target - wd_extra_) * c.glide;
+    wd_step_ = (next - wd_extra_) * inv;
+    if (!c.enabled && wd_extra_ < 1.0e-4F) {
+        // Switched off and (inaudibly close to) neutral: retire.
+        wd_active_ = false;
+        wd_ = {};
+        clear_width_state();
+        update_idle();
+    }
+}
+
+float SourceDsp::width_boost_db() const noexcept {
+    return wd_active_ ? 20.0F * std::log10(1.0F + wd_extra_) : 0.0F;
+}
+
 float SourceDsp::transient_boost_db(std::size_t channel) const noexcept {
     if (!tr_active_ || channel > 1U) return 0.0F;
     // Gain of the high band at the current lead.
@@ -930,7 +1101,7 @@ float SourceDsp::transient_boost_db(std::size_t channel) const noexcept {
 
 void SourceDsp::update_idle() noexcept {
     idle_ = design_.identity && !lev_.enabled && lev_gain_ == 1.0F && lev_target_ == 1.0F &&
-            ramp_steps_left_ == 0U && !px_active_ && !tr_active_;
+            ramp_steps_left_ == 0U && !px_active_ && !tr_active_ && !wd_active_ && !fc_active_;
 }
 
 void SourceDsp::adopt_leveler(const LevelerDesign& design, bool restart_meter) noexcept {

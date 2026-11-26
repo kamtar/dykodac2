@@ -42,6 +42,8 @@ itself.
 | Loudness compensation | on/off; reference 0 to -60 dB host volume; amount 10 to 100 %; max bass lift 1 to 20 dB | off, -10 dB, 70 %, 12 dB | ISO 226 bass/treble lift below the reference volume. |
 | Proximity | on/off; amount 10 to 100 % | off, 50 % | Expands the level difference between the ears (see below). No headroom needed. |
 | Transients | on/off; amount 10 to 100 %; above 1 to 8 kHz | off, 50 %, 2.5 kHz | Lifts treble onsets by up to 10 dB (see below). |
+| Width | on/off; amount 10 to 100 % | off, 50 % | Side boost above 300 Hz that grows with how wide the sound already is, up to 6 dB (see below). |
+| Front cue | on/off; amount 10 to 100 % | off, 50 % | Mid/side cue that moves the centre image forward: up to -6 dB at 8 kHz on mid, +3 dB at 3 kHz on side. |
 | Parametric EQ | 10 bands: peak, low/high shelf (Q form), low/high pass, notch; per-band L/R/both | off | ±20 dB, 10 Hz to 20 kHz, Q 0.1 to 20. |
 
 **Crossfeed.** The bs2b presets mix a low-passed copy of each channel into
@@ -88,8 +90,9 @@ Switching between a mid/side preset and any other crossfeed preset fades the
 old one out and the new one in (2 x 20 ms).
 
 **Boost rule.** The firmware evaluates the worst-case magnitude of
-EQ, crossfeed and balance (192 log-spaced points up to fs/2, plus every band
-centre, +0.1 dB margin). It removes that boost from the headroom
+EQ, crossfeed, balance, transient shaper, width and front cue (192
+log-spaced points up to fs/2, plus every band centre and the detail/space
+centres, +0.1 dB margin). It removes that boost from the headroom
 automatically, as a makeup gain at the end of the source-rate chain, so the
 compensation is time-aligned with the EQ and glides together with it. The app shows the same number, computed by
 `tools/dykodac_config/eq_math.py`, which mirrors the firmware.
@@ -137,6 +140,29 @@ crossfeed off for them.
   50 %). The host test measures +8.8 dB on 6 kHz tone-burst onsets at 100 %
   and none at 200 Hz, with the output never above the input peak.
 
+**Space (width, front cue).** For any stereo music. Both work on mid
+M = (L + R) / 2 and side S = (L - R) / 2, after the detail stage and before
+the crossfeed, so they combine with every crossfeed preset.
+
+- *Width* high-passes the side and the mid at 300 Hz (first-order) and
+  tracks their power (50 ms). The extra side gain e = E·p_s / (p_s + 0.1·p_m)
+  is smoothed per 16 frames (30 ms) and adds e·HP(S) to the side. Half the
+  boost applies with the side 10 dB below the mid. Wide sound (reverb,
+  hard-panned parts) opens up, a near-mono centre gets almost nothing, and
+  bass stays centred. E is up to +6 dB at 100 %. Host test at 100 %:
+  hard-panned 1 kHz side +5.3 dB, a -26 dB side next to a loud centre
+  +0.2 dB, hard-panned 60 Hz +0.4 dB, mono untouched.
+- *Front cue* is a fixed mid/side EQ (two SVFs): a peak dip at 8 kHz (Q 2)
+  on the mid and a broad lift at 3 kHz (Q 0.8) on the side, scaled by the
+  amount. It mimics the outer-ear colouring of a frontal source and pulls the
+  centre forward, out of the head. Switching it on or off glides the filters
+  to and from unity like EQ bands.
+
+Both mix the channels, so the boost rule bounds them per frequency by
+(|Hm + Hs·A| + |Hm - Hs·A|) / 2 with A = 1 + e·HP over the range of e. The
+cost in level: about 6 dB for width at 100 %, about 3 dB for the front cue at
+100 %, about 11 dB for both plus Spacious.
+
 **EQ filters.** Each band runs as a trapezoidal state-variable filter (Simper)
 with exactly the RBJ cookbook response. A direct-form biquad in float32
 (the RT1011 FPU is single precision only) leaves an error near -80 dBFS on
@@ -173,11 +199,13 @@ playback.
 
 ## Persistence
 
-The RT1011 has no EEPROM or internal flash. Settings are a 208-byte record
-(`DKST` magic, sequence number, length, CRC-32, settings) in one of two 4 KiB
+The RT1011 has no EEPROM or internal flash. Settings are a 216-byte record
+(`DKST` magic, sequence number, length, CRC-32, 200 settings bytes) in one of two 4 KiB
 sectors at `0x600FE000` and `0x600FF000`, outside the image. The linker script
 ends FLASH there and asserts it. At boot the firmware loads the newest valid
-record; otherwise it uses defaults.
+record; otherwise it uses defaults. Records of the older 192-byte layout
+(before width and front cue) still load: the missing fields read as off with
+default amounts.
 
 The firmware never erases or programs flash. On this chip the ROM FlexSPI
 driver table sits at API tree word 3, and its member order does not match

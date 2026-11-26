@@ -71,8 +71,12 @@ def make_record(settings_blob: bytes, sequence: int) -> bytes:
 
 def parse_record(sector: bytes) -> tuple[int, bytes] | None:
     magic, sequence, length, crc = _RECORD_HEADER.unpack_from(sector, 0)
-    blob = sector[_RECORD_HEADER.size:_RECORD_HEADER.size + p.SETTINGS_SIZE]
-    if magic != RECORD_MAGIC or length != p.SETTINGS_SIZE or zlib.crc32(blob) & 0xFFFFFFFF != crc:
+    # Records of the 192-byte layout are still valid for the firmware
+    # (it upgrades them), so they count when choosing the next sequence.
+    if magic != RECORD_MAGIC or length not in (p.SETTINGS_SIZE, p.LEGACY_SETTINGS_SIZE):
+        return None
+    blob = sector[_RECORD_HEADER.size:_RECORD_HEADER.size + length]
+    if zlib.crc32(blob) & 0xFFFFFFFF != crc:
         return None
     return sequence, blob
 

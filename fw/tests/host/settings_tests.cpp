@@ -678,6 +678,171 @@ void run_settings_tests() {
         expect(dsp.identity(), "transient shaper switched off ends in identity");
     }
 
+    // ---- space stage: settings and the legacy record --------------------
+    {
+        settings::Settings s = d;
+        s.detail_flags = settings::detail_width | settings::detail_front;
+        expect(settings::validate(s) == settings::Invalid::None, "default width/front values are valid");
+        s.width_amount_pct = 5U;
+        expect(settings::validate(s) == settings::Invalid::Width, "width amount below 10 % rejected");
+        s = d; s.detail_flags = settings::detail_front; s.front_amount_pct = 101U;
+        expect(settings::validate(s) == settings::Invalid::Front, "front amount over 100 % rejected");
+        s = d; s.reserved[5] = 1U;
+        expect(settings::validate(s) == settings::Invalid::Reserved, "trailing reserved bytes checked");
+        // A 192-byte record from before the space stage.
+        std::array<std::uint8_t, settings::legacy_size> legacy{};
+        settings::Settings old = d;
+        old.size = static_cast<std::uint16_t>(settings::legacy_size);
+        old.crossfeed = static_cast<std::uint8_t>(settings::Crossfeed::Spacious);
+        std::memcpy(legacy.data(), &old, legacy.size());
+        settings::Settings loaded{};
+        expect(settings::from_record(loaded, legacy.data(), legacy.size()), "legacy record accepted");
+        expect(settings::validate(loaded) == settings::Invalid::None, "legacy record is valid (space stage off)");
+        settings::upgrade(loaded);
+        settings::Settings want = d;
+        want.crossfeed = old.crossfeed;
+        expect(std::memcmp(&loaded, &want, sizeof(want)) == 0, "legacy record gets the default width/front values");
+        expect(!settings::from_record(loaded, legacy.data(), 100U), "other record lengths rejected");
+        expect(settings::from_record(loaded, &want, sizeof(want)) && std::memcmp(&loaded, &want, sizeof(want)) == 0,
+               "current record read as is");
+    }
+
+    // ---- space stage: width expander and front cue ----------------------
+    {
+        constexpr double fs = 48'000.0;
+        // Steady-state peak of each output channel for a stereo tone pair.
+        // Steady-state peaks of both outputs, and the side amplitude
+        // |L - R| / 2 at f by quadrature projection (all re 1.0e6).
+        double side_amp = 0.0;
+        double left_amp = 0.0;
+        auto run_tone = [&](audio::SourceDsp& dsp, double f, double gl, double gr, double& out_l, double& out_r) {
+            out_l = out_r = 0.0;
+            double si = 0.0, co = 0.0, lsi = 0.0, lco = 0.0;
+            const int n = static_cast<int>(fs);
+            for (int i = 0; i < n; ++i) {
+                const double x = std::sin(2.0 * pi * f * i / fs);
+                float l = static_cast<float>(1.0e6 * gl * x);
+                float r = static_cast<float>(1.0e6 * gr * x);
+                dsp.process(l, r);
+                if (i < n - 9'600) continue;
+                out_l = std::fmax(out_l, std::fabs(l) / 1.0e6);
+                out_r = std::fmax(out_r, std::fabs(r) / 1.0e6);
+                const double side = 0.5 * (static_cast<double>(l) - r) / 1.0e6;
+                si += side * std::sin(2.0 * pi * f * i / fs);
+                co += side * std::cos(2.0 * pi * f * i / fs);
+                lsi += l / 1.0e6 * std::sin(2.0 * pi * f * i / fs);
+                lco += l / 1.0e6 * std::cos(2.0 * pi * f * i / fs);
+            }
+            side_amp = 2.0 * std::sqrt(si * si + co * co) / 9'600.0;
+            left_amp = 2.0 * std::sqrt(lsi * lsi + lco * lco) / 9'600.0;
+        };
+        settings::Settings s = d;
+        s.detail_flags = settings::detail_width;
+        s.width_amount_pct = 100U;
+        const auto wide = audio::design_source_dsp(s, 48'000U);
+        std::cout << "  width 100 %: headroom " << wide.boost_db << " dB\n";
+        expect(wide.boost_db > 5.5F && wide.boost_db < 6.5F, "width boost is covered by the headroom");
+        const double mk = wide.makeup;
+        double ol = 0.0, orr = 0.0;
+        {
+            audio::SourceDsp dsp;
+            dsp.set_design(wide);
+            run_tone(dsp, 1'000.0, 1.0, 1.0, ol, orr);
+            expect(std::fabs(ol / mk - 1.0) < 1.0e-3 && std::fabs(orr / mk - 1.0) < 1.0e-3,
+                   "width leaves a mono signal alone");
+        }
+        {
+            // Hard-panned 1 kHz: S = M, the side grows by up to E p_s / (p_s + 0.1 p_m).
+            audio::SourceDsp dsp;
+            dsp.set_design(wide);
+            run_tone(dsp, 1'000.0, 1.0, 0.0, ol, orr);
+            const double side_db = 20.0 * std::log10(side_amp / mk / 0.5);
+            std::cout << "  width 100 % hard-panned 1 kHz: side " << side_db << " dB, current boost "
+                      << dsp.width_boost_db() << " dB\n";
+            expect(side_db > 4.0, "hard-panned sound is widened");
+            expect(ol <= 1.0 + 1.0e-4 && orr <= 1.0 + 1.0e-4, "width output stays under the input peak");
+            // Switching off glides back and ends in identity.
+            dsp.set_design(audio::design_source_dsp(d, 48'000U));
+            for (int i = 0; i < 48'000; ++i) { float l = 1.0F, r = 0.5F; dsp.process(l, r); }
+            expect(dsp.identity(), "width switched off ends in identity");
+        }
+        {
+            // Centre-heavy: a small side tone (-26 dB) gets almost nothing.
+            audio::SourceDsp dsp;
+            dsp.set_design(wide);
+            const int n = static_cast<int>(fs);
+            double si = 0.0, co = 0.0;
+            for (int i = 0; i < n; ++i) {
+                const double x = std::sin(2.0 * pi * 1'000.0 * i / fs);
+                const double y = 0.05 * std::sin(2.0 * pi * 2'500.0 * i / fs);
+                float l = static_cast<float>(1.0e6 * (x + y));
+                float r = static_cast<float>(1.0e6 * (x - y));
+                dsp.process(l, r);
+                if (i < n / 2) continue;
+                const double side = 0.5 * (l - r) / 1.0e6 / mk;
+                si += side * std::sin(2.0 * pi * 2'500.0 * i / fs);
+                co += side * std::cos(2.0 * pi * 2'500.0 * i / fs);
+            }
+            const double amp = 2.0 * std::sqrt(si * si + co * co) / (n / 2);
+            const double db = 20.0 * std::log10(amp / 0.05);
+            std::cout << "  width 100 % centre-heavy: side " << db << " dB\n";
+            expect(db < 0.5, "a near-mono centre is barely widened");
+        }
+        {
+            // Hard-panned bass stays put (the side boost starts at 300 Hz).
+            audio::SourceDsp dsp;
+            dsp.set_design(wide);
+            run_tone(dsp, 60.0, 1.0, 0.0, ol, orr);
+            const double side_db = 20.0 * std::log10(side_amp / mk / 0.5);
+            std::cout << "  width 100 % hard-panned 60 Hz: side " << side_db << " dB\n";
+            expect(side_db < 1.0, "bass is not widened");
+        }
+
+        s = d;
+        s.detail_flags = settings::detail_front;
+        s.front_amount_pct = 100U;
+        const auto front = audio::design_source_dsp(s, 48'000U);
+        std::cout << "  front 100 %: headroom " << front.boost_db << " dB\n";
+        expect(front.boost_db > 2.5F && front.boost_db < 3.6F, "front cue boost is covered by the headroom");
+        const double fm = front.makeup;
+        struct Case { double f; double gl; double gr; double want_db; const char* what; };
+        for (const Case c : {Case{8'000.0, 1.0, 1.0, -6.0, "front cue dips the centre at 8 kHz"},
+                             Case{1'000.0, 1.0, 1.0, 0.0, "front cue leaves the centre at 1 kHz"},
+                             Case{3'000.0, 1.0, -1.0, 3.0, "front cue lifts the side at 3 kHz"},
+                             Case{300.0, 1.0, -1.0, 0.0, "front cue leaves the side at 300 Hz"}}) {
+            audio::SourceDsp dsp;
+            dsp.set_design(front);
+            run_tone(dsp, c.f, c.gl, c.gr, ol, orr);
+            const double db = 20.0 * std::log10(left_amp / fm);
+            std::cout << "  front 100 % @" << c.f << " Hz (" << (c.gr > 0 ? "mid" : "side") << "): " << db << " dB\n";
+            expect(std::fabs(db - c.want_db) < 0.3, c.what);
+            expect(ol <= 1.0 + 1.0e-4, "front cue output stays under the input peak");
+        }
+        {
+            audio::SourceDsp dsp;
+            dsp.set_design(front);
+            dsp.set_design(audio::design_source_dsp(d, 48'000U));
+            for (int i = 0; i < 4'800; ++i) { float l = 1.0F, r = 0.5F; dsp.process(l, r); }
+            expect(dsp.identity(), "front cue switched off ends in identity");
+        }
+        {
+            // Both at once (with Spacious): still never over the input peak.
+            s = d;
+            s.detail_flags = settings::detail_width | settings::detail_front;
+            s.width_amount_pct = 100U;
+            s.front_amount_pct = 100U;
+            s.crossfeed = static_cast<std::uint8_t>(settings::Crossfeed::Spacious);
+            const auto both = audio::design_source_dsp(s, 48'000U);
+            std::cout << "  width + front + Spacious 100 %: headroom " << both.boost_db << " dB\n";
+            for (const double f : {200.0, 1'000.0, 3'000.0, 6'000.0}) {
+                audio::SourceDsp dsp;
+                dsp.set_design(both);
+                run_tone(dsp, f, 1.0, -0.3, ol, orr);
+                expect(ol <= 1.0 + 1.0e-4 && orr <= 1.0 + 1.0e-4, "width + front + crossfeed stay under the input peak");
+            }
+        }
+    }
+
     // ---- loudness leveler and loudness compensation ---------------------
     {
         settings::Settings s = d;
@@ -714,7 +879,7 @@ void run_settings_tests() {
         expect(settings::validate(s) == settings::Invalid::Loudness, "loudness amount over 100 % rejected");
         s = d; s.leveler_mode = 3U; s.loudness_enabled = 1U;
         expect(settings::validate(s) == settings::Invalid::None, "default leveler/loudness values are valid");
-        s = d; s.detail_flags = 0x04U;
+        s = d; s.detail_flags = 0x10U;
         expect(settings::validate(s) == settings::Invalid::Reserved, "unknown detail bits rejected");
     }
     {

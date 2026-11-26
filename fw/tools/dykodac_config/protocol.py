@@ -18,7 +18,8 @@ USAGE_PAGE = 0xFF00
 PROTOCOL_VERSION = 1
 SETTINGS_MAGIC = 0x46434B44  # "DKCF"
 SETTINGS_VERSION = 1
-SETTINGS_SIZE = 192
+SETTINGS_SIZE = 200
+LEGACY_SETTINGS_SIZE = 192  # flash records from before the space stage
 EQ_BANDS = 10
 CHUNK = 48
 REQUEST_PREFIX = b"DYKO-CFG"
@@ -35,6 +36,7 @@ INVALID_NAMES = [
     "none", "header", "upsampler mode", "DAC filter", "crossfeed", "headroom", "DAC ceiling",
     "balance", "polarity", "reserved bytes", "band type", "band channels", "band frequency",
     "band gain", "band Q", "leveler", "loudness compensation", "proximity", "transient shaper",
+    "width", "front cue",
 ]
 FLASH_RESULT_NAMES = [
     "OK", "no record", "unavailable", "init failed", "erase failed", "program failed",
@@ -75,17 +77,23 @@ MIN_LOUDNESS_BOOST, MAX_LOUDNESS_BOOST = 1, 20
 MIN_DETAIL_AMOUNT, MAX_DETAIL_AMOUNT = 10, 100
 MIN_TRANSIENT_HZ, MAX_TRANSIENT_HZ = 1000, 8000  # 100 Hz steps on the wire
 MAX_TRANSIENT_BOOST_DB = 10.0
-DETAIL_PROXIMITY, DETAIL_TRANSIENT = 0x01, 0x02
+MAX_WIDTH_BOOST_DB = 6.0
+FRONT_MID_HZ, FRONT_MID_Q, MAX_FRONT_MID_CUT_DB = 8000.0, 2.0, 6.0
+FRONT_SIDE_HZ, FRONT_SIDE_Q, MAX_FRONT_SIDE_BOOST_DB = 3000.0, 0.8, 3.0
+WIDTH_SPLIT_HZ = 300.0
+DETAIL_PROXIMITY, DETAIL_TRANSIENT, DETAIL_WIDTH, DETAIL_FRONT = 0x01, 0x02, 0x04, 0x08
 # ISO 226 fit used by the firmware (audio/source_dsp.hpp).
 LOUDNESS_BASS_HZ, LOUDNESS_BASS_Q, LOUDNESS_BASS_PER_DB = 111.0, 0.38, 0.56
 LOUDNESS_TREBLE_HZ, LOUDNESS_TREBLE_Q, LOUDNESS_TREBLE_PER_DB = 10200.0, 1.22, 0.17
 
 _HEADER = struct.Struct("<IHHBBBBhhhBBBBhBBhBBBB")
 _BAND = struct.Struct("<BBHfff")
+_TAIL = struct.Struct("<BB6x")
 _REQUEST = struct.Struct("<8sBBHB3x48s")
 _RESPONSE = struct.Struct("<IBBBBHBBI48s")
 _INFO = struct.Struct("<HHHBBIIIhhffBBBBfff")
-assert _HEADER.size + EQ_BANDS * _BAND.size == SETTINGS_SIZE
+assert _HEADER.size + EQ_BANDS * _BAND.size == LEGACY_SETTINGS_SIZE
+assert LEGACY_SETTINGS_SIZE + _TAIL.size == SETTINGS_SIZE
 assert _REQUEST.size == 64 and _RESPONSE.size == 64
 
 
@@ -136,6 +144,11 @@ class Settings:
     transient_enabled: bool = False
     transient_amount_pct: int = 50  # 100 % = MAX_TRANSIENT_BOOST_DB on onsets
     transient_crossover_hz: int = 2500
+    # Space stage (mid/side): width expander and front cue.
+    width_enabled: bool = False
+    width_amount_pct: int = 50  # 100 % = up to MAX_WIDTH_BOOST_DB side gain
+    front_enabled: bool = False
+    front_amount_pct: int = 50
 
     # --- wire format -------------------------------------------------------
     def pack(self) -> bytes:
@@ -146,7 +159,8 @@ class Settings:
             1 if self.eq_enabled else 0, self.crossfeed,
             _q88(self.headroom_db), _q88(round(self.dac_ceiling_db * 2.0) / 2.0), _q88(self.balance_db),
             polarity,
-            (DETAIL_PROXIMITY if self.proximity_enabled else 0) | (DETAIL_TRANSIENT if self.transient_enabled else 0),
+            (DETAIL_PROXIMITY if self.proximity_enabled else 0) | (DETAIL_TRANSIENT if self.transient_enabled else 0)
+            | (DETAIL_WIDTH if self.width_enabled else 0) | (DETAIL_FRONT if self.front_enabled else 0),
             self.leveler_mode, int(self.leveler_max_cut_db), _q88(self.leveler_target_db),
             1 if self.loudness_enabled else 0, int(self.loudness_amount_pct), _q88(self.loudness_reference_db),
             int(self.loudness_max_boost_db),
@@ -157,7 +171,7 @@ class Settings:
         for b in bands:
             out += _BAND.pack(b.type, b.channels if b.type else CH_BOTH, 0,
                               float(b.frequency_hz), float(b.gain_db), float(b.q))
-        return out
+        return out + _TAIL.pack(int(self.width_amount_pct), int(self.front_amount_pct))
 
     @classmethod
     def unpack(cls, data: bytes) -> "Settings":
@@ -188,6 +202,11 @@ class Settings:
         if prox_amount or tr_amount or tr_xover:
             s.proximity_amount_pct, s.transient_amount_pct = prox_amount, tr_amount
             s.transient_crossover_hz = tr_xover * 100
+        s.width_enabled = bool(detail & DETAIL_WIDTH)
+        s.front_enabled = bool(detail & DETAIL_FRONT)
+        width_amount, front_amount = _TAIL.unpack_from(data, LEGACY_SETTINGS_SIZE)
+        if width_amount or front_amount:
+            s.width_amount_pct, s.front_amount_pct = width_amount, front_amount
         return s
 
     # --- preset files ------------------------------------------------------
@@ -231,6 +250,10 @@ class Settings:
                 p.append(f"Transient amount must be {MIN_DETAIL_AMOUNT}..{MAX_DETAIL_AMOUNT} %")
             if not MIN_TRANSIENT_HZ <= self.transient_crossover_hz <= MAX_TRANSIENT_HZ:
                 p.append(f"Transient crossover must be {MIN_TRANSIENT_HZ}..{MAX_TRANSIENT_HZ} Hz")
+        if self.width_enabled and not MIN_DETAIL_AMOUNT <= self.width_amount_pct <= MAX_DETAIL_AMOUNT:
+            p.append(f"Width amount must be {MIN_DETAIL_AMOUNT}..{MAX_DETAIL_AMOUNT} %")
+        if self.front_enabled and not MIN_DETAIL_AMOUNT <= self.front_amount_pct <= MAX_DETAIL_AMOUNT:
+            p.append(f"Front cue amount must be {MIN_DETAIL_AMOUNT}..{MAX_DETAIL_AMOUNT} %")
         for i, b in enumerate(self.bands, 1):
             if not b.active():
                 continue

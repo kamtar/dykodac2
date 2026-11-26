@@ -24,8 +24,10 @@ const Record* record_at(std::uint32_t sector) noexcept {
 }
 
 bool record_valid(const Record& r) noexcept {
-    return r.magic == record_magic && r.length == sizeof(settings::Settings) &&
-           r.crc == settings::crc32(&r.settings, sizeof(settings::Settings));
+    // Records of the 192-byte layout stay readable (settings::from_record).
+    return r.magic == record_magic &&
+           (r.length == sizeof(settings::Settings) || r.length == settings::legacy_size) &&
+           r.crc == settings::crc32(&r.settings, r.length);
 }
 } // namespace
 
@@ -47,7 +49,7 @@ app::FlashResult load(settings::Settings& out, std::uint32_t& sequence) noexcept
         if (!best || static_cast<std::int32_t>(r->sequence - best->sequence) > 0) best = r;
     }
     if (!best) return app::FlashResult::NoRecord;
-    std::memcpy(&out, &best->settings, sizeof(out));
+    if (!settings::from_record(out, &best->settings, best->length)) return app::FlashResult::NoRecord;
     sequence = best->sequence;
     return app::FlashResult::Ok;
 }

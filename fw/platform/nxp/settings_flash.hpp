@@ -22,12 +22,12 @@ inline constexpr std::uint32_t sector_count = 2U;
 struct Record {
     std::uint32_t magic;    // "DKST"
     std::uint32_t sequence; // newest valid record wins
-    std::uint32_t length;   // sizeof(settings::Settings)
+    std::uint32_t length;   // sizeof(settings::Settings), or settings::legacy_size
     std::uint32_t crc;      // CRC-32 over settings
     settings::Settings settings;
 };
 inline constexpr std::uint32_t record_magic = 0x54534B44U;
-static_assert(sizeof(Record) == 208U, "flash record layout is shared with flash_store.py");
+static_assert(sizeof(Record) == 216U, "flash record layout is shared with flash_store.py");
 
 // Read-only copy from the boot ROM (0x00200000..0x0023FFFF), a diagnostic
 // for inspecting the ROM API tables from the host.
