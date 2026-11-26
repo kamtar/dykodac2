@@ -31,6 +31,20 @@
 // constants and turns the chain down (never up) towards a target loudness.
 // Its gain is a per-sample smoothed multiplier at the end of the chain.
 //
+// The detail stage sits between the EQ and the crossfeed (both parts are
+// meant for close-miked, binaural material such as ASMR):
+//  - Proximity expands the interaural level difference in two bands (a
+//    bilinear first-order split at 1.2 kHz): every 16 frames the quieter
+//    side of each band is cut by amount x its level difference, so a
+//    source near one ear moves closer still. Cut-only, and the split is
+//    power-complementary with LP and HP in quadrature, so the output never
+//    exceeds the input: no headroom is needed.
+//  - The transient shaper high-passes each channel at the crossover and
+//    follows its power with a fast and a slow envelope. While the
+//    fast one leads (an onset: taps, crinkles, consonants) the high band is
+//    added again, up to the maximum boost at a 6 dB lead. The boost bound
+//    max(1, |1 + G H_hp|) is part of the headroom analysis.
+//
 // Live changes are click-free: set_design() glides every parameter (band
 // tuning and mix, trims, crossfeed amount) linearly to the new design over
 // ramp_seconds. Bands that appear or disappear fade from or to unity.
@@ -145,6 +159,26 @@ struct LevelerDesign {
     float min_gain{1.0F};      // 10^(-max_cut / 20)
 };
 
+struct ProximityDesign {
+    bool enabled{false};
+    FirstOrder split{};      // bilinear one-pole low-pass: low band; high = input - low
+    float envelope{0.0F};    // per-frame smoothing of the band powers
+    float exponent{0.0F};    // quieter-side gain = (p_quiet / p_loud)^exponent
+    float min_gain{1.0F};    // deepest cut
+    float floor_power{0.0F}; // added to both powers: quiet passages stay neutral
+};
+
+struct TransientDesign {
+    bool enabled{false};
+    Biquad highpass{};       // analysis form
+    SvfParams highpass_svf{}; // runtime form (Butterworth)
+    float fast{0.0F};        // per-frame smoothing of the high-band power (~1 ms)
+    float slow_attack{0.0F}; // the slow envelope follows the fast one
+    float slow_release{0.0F};
+    float boost{0.0F};       // G: high band added at full lead, 10^(dB/20) - 1
+    float floor{0.0F};       // power floor of the lead ratio (no boost from hiss)
+};
+
 struct SourceDspDesign {
     std::uint32_t sample_rate_hz{0U};
     // Slot i of each channel is band i; inactive slots are skipped.
@@ -169,6 +203,8 @@ struct SourceDspDesign {
     float loudness_bass_db{0.0F};
     float loudness_treble_db{0.0F};
     LevelerDesign leveler{};
+    ProximityDesign proximity{};
+    TransientDesign transient{};
     bool identity{true};
 };
 
@@ -216,6 +252,10 @@ public:
     float crossfeed_amount() const noexcept { return xf_amount_; }
     float waveform_correlation() const noexcept { return waveform_correlation_; }
     float envelope_correlation() const noexcept { return envelope_correlation_; }
+    // Proximity: current gains (low band left, right, high band left, right)
+    // and the transient shaper's current boost per channel (dB).
+    float proximity_gain(std::size_t i) const noexcept { return px_gain_[i]; }
+    float transient_boost_db(std::size_t channel) const noexcept;
 
     inline void process(float& left, float& right) noexcept {
         if (idle_) return;
@@ -227,6 +267,11 @@ public:
             const auto bit = static_cast<std::uint16_t>(1U << i);
             if ((live_left_mask_ & bit) != 0U) l = run(left_[i], l);
             if ((live_right_mask_ & bit) != 0U) r = run(right_[i], r);
+        }
+        if (px_active_) proximity(l, r);
+        if (tr_active_) {
+            l = transient(0U, l);
+            r = transient(1U, r);
         }
         if (xf_active_ && xf_.mid_side) {
             if (xf_.adaptive) correlation_meter(l, r);
@@ -330,6 +375,42 @@ private:
         if (++cm_fill_ >= xf_.meter_block) end_correlation_block();
     }
     void end_correlation_block() noexcept;
+    // Detail stage (see the top of this file).
+    inline void proximity(float& l, float& r) noexcept {
+        const auto& c = px_;
+        const float lo_l = first_order(c.split, l, px_x1_[0], px_y1_[0]);
+        const float lo_r = first_order(c.split, r, px_x1_[1], px_y1_[1]);
+        const float hi_l = l - lo_l;
+        const float hi_r = r - lo_r;
+        px_power_[0] += (lo_l * lo_l - px_power_[0]) * c.envelope;
+        px_power_[1] += (lo_r * lo_r - px_power_[1]) * c.envelope;
+        px_power_[2] += (hi_l * hi_l - px_power_[2]) * c.envelope;
+        px_power_[3] += (hi_r * hi_r - px_power_[3]) * c.envelope;
+        for (std::size_t i = 0U; i < 4U; ++i) px_gain_[i] += px_step_[i];
+        l = px_gain_[0] * lo_l + px_gain_[2] * hi_l;
+        r = px_gain_[1] * lo_r + px_gain_[3] * hi_r;
+        if (++px_fill_ == ramp_block_frames) end_proximity_block();
+    }
+    void end_proximity_block() noexcept;
+    inline float transient(std::size_t ch, float x) noexcept {
+        const auto& c = tr_;
+        const float h = run(tr_highpass_[ch], x);
+        // Both envelopes follow the same smoothed power, so they agree on a
+        // steady sound; the slow one lags behind an onset.
+        float& fast = tr_fast_[ch];
+        float& slow = tr_slow_[ch];
+        fast += (h * h - fast) * c.fast;
+        slow += (fast - slow) * (fast > slow ? c.slow_attack : c.slow_release);
+        // Lead of the fast envelope over the slow one: 0 when steady, 1 at
+        // a 6 dB onset (4x the power).
+        float lead = (fast - slow) / (3.0F * (slow + c.floor));
+        lead = lead < 0.0F ? 0.0F : (lead > 1.0F ? 1.0F : lead);
+        tr_lead_[ch] = lead;
+        return x + (tr_wet_ * c.boost * lead) * h;
+    }
+    void clear_detail_state() noexcept;
+    void clear_detail_state_proximity() noexcept;
+    void clear_detail_state_transient() noexcept;
     inline void meter(float l, float r) noexcept {
         const float kl = biquad(lev_.k_highpass, biquad(lev_.k_shelf, l, k_state_[0], k_state_[1]),
                                 k_state_[2], k_state_[3]);
@@ -403,6 +484,25 @@ private:
     bool cm_primed_{false};
     float waveform_correlation_{1.0F};
     float envelope_correlation_{0.5F};
+    // Detail stage. Proximity fades by its exponent (the gains then glide
+    // back to unity), the transient shaper by its wet amount.
+    ProximityDesign px_{};
+    bool px_active_{false};
+    float px_x1_[2]{};
+    float px_y1_[2]{};
+    float px_power_[4]{};
+    float px_gain_[4]{1.0F, 1.0F, 1.0F, 1.0F};
+    float px_step_[4]{};
+    std::uint32_t px_fill_{0U};
+    TransientDesign tr_{};
+    bool tr_active_{false};
+    float tr_wet_{0.0F};
+    float tr_wet_from_{0.0F};
+    float tr_wet_to_{0.0F};
+    std::array<Band, 2> tr_highpass_{};
+    float tr_fast_[2]{};
+    float tr_slow_[2]{};
+    float tr_lead_[2]{};
     // Leveler. The loudness estimate and gain survive stream restarts and
     // redesigns; only the meter filters restart.
     LevelerDesign lev_{};

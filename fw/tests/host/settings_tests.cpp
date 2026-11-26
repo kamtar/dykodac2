@@ -556,6 +556,128 @@ void run_settings_tests() {
         expect(dsp.identity(), "neutral design is identity once the fade ends");
     }
 
+    // ---- detail stage: settings ------------------------------------------
+    {
+        settings::Settings s = d;
+        s.proximity_amount_pct = 0U; s.transient_amount_pct = 0U; s.transient_crossover_100hz = 0U;
+        expect(settings::validate(s) == settings::Invalid::None, "records from before the detail stage are valid (off)");
+        settings::upgrade(s);
+        expect(std::memcmp(&s, &d, sizeof(s)) == 0, "old records get the default detail parameters");
+        s = d; s.detail_flags = settings::detail_all;
+        expect(settings::validate(s) == settings::Invalid::None, "default detail values are valid");
+        s.proximity_amount_pct = 5U;
+        expect(settings::validate(s) == settings::Invalid::Proximity, "proximity amount below 10 % rejected");
+        s = d; s.detail_flags = settings::detail_transient; s.transient_amount_pct = 101U;
+        expect(settings::validate(s) == settings::Invalid::Transient, "transient amount over 100 % rejected");
+        s = d; s.detail_flags = settings::detail_transient; s.transient_crossover_100hz = 81U;
+        expect(settings::validate(s) == settings::Invalid::Transient, "transient crossover above 8 kHz rejected");
+        s = d; s.transient_crossover_100hz = 200U;
+        expect(settings::validate(s) == settings::Invalid::None, "detail fields are only checked while on");
+    }
+
+    // ---- detail stage: proximity expands the level difference ------------
+    {
+        constexpr double fs = 48'000.0;
+        settings::Settings s = d;
+        s.detail_flags = settings::detail_proximity;
+        s.proximity_amount_pct = 100U;
+        const auto design = audio::design_source_dsp(s, 48'000U);
+        expect(!design.identity && design.boost_db == 0.0F, "proximity is processed and needs no headroom");
+        // Amplitude of one frequency by quadrature projection.
+        struct Probe { double f; double si{0.0}; double co{0.0}; };
+        auto amplitude = [](const Probe& p, int n) { return 2.0 * std::sqrt(p.si * p.si + p.co * p.co) / n; };
+        for (const double ratio : {1.0, 0.5, 0.25}) {
+            audio::SourceDsp dsp;
+            dsp.set_design(design);
+            Probe pl[2]{{300.0}, {4'000.0}}, pr[2]{{300.0}, {4'000.0}};
+            const int n = static_cast<int>(fs);
+            for (int i = 0; i < 2 * n; ++i) {
+                const double lo = std::sin(2.0 * pi * 300.0 * i / fs), hi = std::sin(2.0 * pi * 4'000.0 * i / fs);
+                float l = static_cast<float>(1.0e6 * (lo + hi));
+                float r = static_cast<float>(1.0e6 * ratio * (lo + hi));
+                dsp.process(l, r);
+                if (i < n) continue;
+                for (int b = 0; b < 2; ++b) {
+                    const double ph = 2.0 * pi * pl[b].f * i / fs;
+                    pl[b].si += l * std::sin(ph); pl[b].co += l * std::cos(ph);
+                    pr[b].si += r * std::sin(ph); pr[b].co += r * std::cos(ph);
+                }
+            }
+            const double ild_in = -20.0 * std::log10(ratio);
+            for (int b = 0; b < 2; ++b) {
+                const double al = amplitude(pl[b], n), ar = amplitude(pr[b], n);
+                const double ild = 20.0 * std::log10(al / ar);
+                std::cout << "  proximity 100 % @" << pl[b].f << " Hz: ILD " << ild_in << " -> " << ild
+                          << " dB, louder side " << 20.0 * std::log10(al / 1.0e6) << " dB\n";
+                expect(std::fabs(20.0 * std::log10(al / 1.0e6)) < 0.05, "proximity leaves the louder side alone");
+                expect(std::fabs(ild - 2.0 * ild_in) < 0.3, "proximity 100 % doubles the level difference");
+            }
+        }
+        // Never louder than the input, whatever the (independent) channels do.
+        audio::SourceDsp dsp;
+        dsp.set_design(design);
+        std::uint32_t seed = 777U;
+        auto noise = [&seed]() {
+            seed = seed * 1'664'525U + 1'013'904'223U;
+            return static_cast<double>(seed >> 8U) / 8'388'608.0 - 1.0;
+        };
+        double in_l = 0.0, in_r = 0.0, out_l = 0.0, out_r = 0.0;
+        for (int i = 0; i < 5 * static_cast<int>(fs); ++i) {
+            const double env_l = 0.5 + 0.5 * std::sin(2.0 * pi * 0.7 * i / fs);
+            const double env_r = 0.5 + 0.5 * std::sin(2.0 * pi * 1.1 * i / fs);
+            float l = static_cast<float>(2.0e6 * env_l * noise());
+            float r = static_cast<float>(2.0e6 * env_r * noise());
+            in_l += static_cast<double>(l) * l; in_r += static_cast<double>(r) * r;
+            dsp.process(l, r);
+            out_l += static_cast<double>(l) * l; out_r += static_cast<double>(r) * r;
+        }
+        expect(out_l <= in_l && out_r <= in_r, "proximity only cuts");
+        // Switching off glides back to unity and ends in identity.
+        dsp.set_design(audio::design_source_dsp(d, 48'000U));
+        for (int i = 0; i < 4'800; ++i) { float l = 1.0F, r = 0.5F; dsp.process(l, r); }
+        expect(dsp.identity(), "proximity switched off ends in identity");
+    }
+
+    // ---- detail stage: transient shaper ---------------------------------
+    {
+        constexpr double fs = 48'000.0;
+        settings::Settings s = d;
+        s.detail_flags = settings::detail_transient;
+        s.transient_amount_pct = 100U;
+        s.transient_crossover_100hz = 25U;
+        const auto design = audio::design_source_dsp(s, 48'000U);
+        std::cout << "  transient 100 %: headroom " << design.boost_db << " dB\n";
+        expect(design.boost_db > 9.5F && design.boost_db < 11.0F, "transient boost is covered by the headroom");
+        // Tone bursts: 60 ms on, 140 ms off, at 6 kHz (boosted) and 200 Hz (not).
+        for (const double f : {6'000.0, 200.0}) {
+            audio::SourceDsp dsp;
+            dsp.set_design(design);
+            double onset_peak = 0.0, steady_peak = 0.0, in_peak = 0.0;
+            for (int i = 0; i < 2 * static_cast<int>(fs); ++i) {
+                const int t = i % 9'600;
+                const double x = t < 2'880 ? 3.0e6 * std::sin(2.0 * pi * f * t / fs) : 0.0;
+                float l = static_cast<float>(x), r = l;
+                dsp.process(l, r);
+                in_peak = std::fmax(in_peak, std::fabs(x));
+                if (i < static_cast<int>(fs)) continue;
+                if (t < 480) onset_peak = std::fmax(onset_peak, std::fabs(l));
+                else if (t > 2'000 && t < 2'880) steady_peak = std::fmax(steady_peak, std::fabs(l));
+            }
+            const double lift = 20.0 * std::log10(onset_peak / steady_peak);
+            std::cout << "  transient @" << f << " Hz: onset " << lift << " dB above steady, peak "
+                      << 20.0 * std::log10(onset_peak / in_peak) << " dB re input\n";
+            expect(onset_peak <= in_peak * 1.0001, "transient shaper never exceeds the input peak");
+            if (f > 1'000.0) expect(lift > 6.0, "onsets of the high band are lifted");
+            else expect(lift < 0.5, "low frequencies are left alone");
+        }
+        // Switching off fades out and ends in identity.
+        audio::SourceDsp dsp;
+        dsp.set_design(design);
+        dsp.set_design(audio::design_source_dsp(d, 48'000U));
+        for (int i = 0; i < 4'800; ++i) { float l = 1.0F, r = 0.5F; dsp.process(l, r); }
+        expect(dsp.identity(), "transient shaper switched off ends in identity");
+    }
+
     // ---- loudness leveler and loudness compensation ---------------------
     {
         settings::Settings s = d;
@@ -592,8 +714,8 @@ void run_settings_tests() {
         expect(settings::validate(s) == settings::Invalid::Loudness, "loudness amount over 100 % rejected");
         s = d; s.leveler_mode = 3U; s.loudness_enabled = 1U;
         expect(settings::validate(s) == settings::Invalid::None, "default leveler/loudness values are valid");
-        s = d; s.reserved1[0] = 1U;
-        expect(settings::validate(s) == settings::Invalid::Reserved, "remaining reserved bytes still checked");
+        s = d; s.detail_flags = 0x04U;
+        expect(settings::validate(s) == settings::Invalid::Reserved, "unknown detail bits rejected");
     }
     {
         // Shelf gains follow the attenuation below the reference and cap.

@@ -34,7 +34,7 @@ STATUS_NAMES = {
 INVALID_NAMES = [
     "none", "header", "upsampler mode", "DAC filter", "crossfeed", "headroom", "DAC ceiling",
     "balance", "polarity", "reserved bytes", "band type", "band channels", "band frequency",
-    "band gain", "band Q", "leveler", "loudness compensation",
+    "band gain", "band Q", "leveler", "loudness compensation", "proximity", "transient shaper",
 ]
 FLASH_RESULT_NAMES = [
     "OK", "no record", "unavailable", "init failed", "erase failed", "program failed",
@@ -72,11 +72,15 @@ MIN_LEVELER_CUT, MAX_LEVELER_CUT = 1, 30
 MIN_LOUDNESS_AMOUNT, MAX_LOUDNESS_AMOUNT = 10, 100
 MIN_LOUDNESS_REFERENCE = -60.0
 MIN_LOUDNESS_BOOST, MAX_LOUDNESS_BOOST = 1, 20
+MIN_DETAIL_AMOUNT, MAX_DETAIL_AMOUNT = 10, 100
+MIN_TRANSIENT_HZ, MAX_TRANSIENT_HZ = 1000, 8000  # 100 Hz steps on the wire
+MAX_TRANSIENT_BOOST_DB = 10.0
+DETAIL_PROXIMITY, DETAIL_TRANSIENT = 0x01, 0x02
 # ISO 226 fit used by the firmware (audio/source_dsp.hpp).
 LOUDNESS_BASS_HZ, LOUDNESS_BASS_Q, LOUDNESS_BASS_PER_DB = 111.0, 0.38, 0.56
 LOUDNESS_TREBLE_HZ, LOUDNESS_TREBLE_Q, LOUDNESS_TREBLE_PER_DB = 10200.0, 1.22, 0.17
 
-_HEADER = struct.Struct("<IHHBBBBhhhBBBBhBBhB3x")
+_HEADER = struct.Struct("<IHHBBBBhhhBBBBhBBhBBBB")
 _BAND = struct.Struct("<BBHfff")
 _REQUEST = struct.Struct("<8sBBHB3x48s")
 _RESPONSE = struct.Struct("<IBBBBHBBI48s")
@@ -125,6 +129,13 @@ class Settings:
     loudness_amount_pct: int = 70
     loudness_reference_db: float = -10.0  # host volume where the curve is flat
     loudness_max_boost_db: int = 12
+    # Detail stage: proximity (interaural level difference expansion) and
+    # the high-band transient shaper.
+    proximity_enabled: bool = False
+    proximity_amount_pct: int = 50  # 100 % doubles the level difference
+    transient_enabled: bool = False
+    transient_amount_pct: int = 50  # 100 % = MAX_TRANSIENT_BOOST_DB on onsets
+    transient_crossover_hz: int = 2500
 
     # --- wire format -------------------------------------------------------
     def pack(self) -> bytes:
@@ -134,10 +145,13 @@ class Settings:
             1 if self.upsampler_bypass else 0, 1 if self.dac_slow_rolloff else 0,
             1 if self.eq_enabled else 0, self.crossfeed,
             _q88(self.headroom_db), _q88(round(self.dac_ceiling_db * 2.0) / 2.0), _q88(self.balance_db),
-            polarity, 0,
+            polarity,
+            (DETAIL_PROXIMITY if self.proximity_enabled else 0) | (DETAIL_TRANSIENT if self.transient_enabled else 0),
             self.leveler_mode, int(self.leveler_max_cut_db), _q88(self.leveler_target_db),
             1 if self.loudness_enabled else 0, int(self.loudness_amount_pct), _q88(self.loudness_reference_db),
             int(self.loudness_max_boost_db),
+            int(self.proximity_amount_pct), int(self.transient_amount_pct),
+            int(round(self.transient_crossover_hz / 100.0)),
         )
         bands = (self.bands + [EqBand() for _ in range(EQ_BANDS)])[:EQ_BANDS]
         for b in bands:
@@ -149,8 +163,9 @@ class Settings:
     def unpack(cls, data: bytes) -> "Settings":
         if len(data) != SETTINGS_SIZE:
             raise ProtocolError(f"settings block is {len(data)} bytes, expected {SETTINGS_SIZE}")
-        (magic, version, size, bypass, slow, eq, xf, headroom, ceiling, balance, polarity, _r,
-         lev_mode, lev_cut, lev_target, loud_on, loud_amount, loud_ref, loud_boost) = _HEADER.unpack_from(data, 0)
+        (magic, version, size, bypass, slow, eq, xf, headroom, ceiling, balance, polarity, detail,
+         lev_mode, lev_cut, lev_target, loud_on, loud_amount, loud_ref, loud_boost,
+         prox_amount, tr_amount, tr_xover) = _HEADER.unpack_from(data, 0)
         if magic != SETTINGS_MAGIC or version != SETTINGS_VERSION or size != SETTINGS_SIZE:
             raise ProtocolError("device settings layout is not supported by this tool")
         bands = []
@@ -168,6 +183,11 @@ class Settings:
         if loud_amount:
             s.loudness_amount_pct, s.loudness_reference_db, s.loudness_max_boost_db = \
                 loud_amount, loud_ref / 256.0, loud_boost
+        s.proximity_enabled = bool(detail & DETAIL_PROXIMITY)
+        s.transient_enabled = bool(detail & DETAIL_TRANSIENT)
+        if prox_amount or tr_amount or tr_xover:
+            s.proximity_amount_pct, s.transient_amount_pct = prox_amount, tr_amount
+            s.transient_crossover_hz = tr_xover * 100
         return s
 
     # --- preset files ------------------------------------------------------
@@ -204,6 +224,13 @@ class Settings:
                 p.append(f"Loudness reference must be between {MIN_LOUDNESS_REFERENCE:g} and 0 dB")
             if not MIN_LOUDNESS_BOOST <= self.loudness_max_boost_db <= MAX_LOUDNESS_BOOST:
                 p.append(f"Loudness maximum boost must be {MIN_LOUDNESS_BOOST}..{MAX_LOUDNESS_BOOST} dB")
+        if self.proximity_enabled and not MIN_DETAIL_AMOUNT <= self.proximity_amount_pct <= MAX_DETAIL_AMOUNT:
+            p.append(f"Proximity amount must be {MIN_DETAIL_AMOUNT}..{MAX_DETAIL_AMOUNT} %")
+        if self.transient_enabled:
+            if not MIN_DETAIL_AMOUNT <= self.transient_amount_pct <= MAX_DETAIL_AMOUNT:
+                p.append(f"Transient amount must be {MIN_DETAIL_AMOUNT}..{MAX_DETAIL_AMOUNT} %")
+            if not MIN_TRANSIENT_HZ <= self.transient_crossover_hz <= MAX_TRANSIENT_HZ:
+                p.append(f"Transient crossover must be {MIN_TRANSIENT_HZ}..{MAX_TRANSIENT_HZ} Hz")
         for i, b in enumerate(self.bands, 1):
             if not b.active():
                 continue

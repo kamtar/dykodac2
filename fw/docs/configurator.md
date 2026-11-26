@@ -40,6 +40,8 @@ itself.
 | Crossfeed | off, bs2b default, Chu Moy, Jan Meier, Natural, Virtual speakers ±30° / ±45°, Spacious | off | bs2b first-order crossfeed, or a mid/side crossfeed that leaves the centre untouched (see below). |
 | Leveler | off, slow, medium, fast; target -36 to -6 LUFS; max cut 1 to 30 dB | off, -18 LUFS, 12 dB | Cut-only automatic level (see below). |
 | Loudness compensation | on/off; reference 0 to -60 dB host volume; amount 10 to 100 %; max bass lift 1 to 20 dB | off, -10 dB, 70 %, 12 dB | ISO 226 bass/treble lift below the reference volume. |
+| Proximity | on/off; amount 10 to 100 % | off, 50 % | Expands the level difference between the ears (see below). No headroom needed. |
+| Transients | on/off; amount 10 to 100 %; above 1 to 8 kHz | off, 50 %, 2.5 kHz | Lifts treble onsets by up to 10 dB (see below). |
 | Parametric EQ | 10 bands: peak, low/high shelf (Q form), low/high pass, notch; per-band L/R/both | off | ±20 dB, 10 Hz to 20 kHz, Q 0.1 to 20. |
 
 **Crossfeed.** The bs2b presets mix a low-passed copy of each channel into
@@ -111,6 +113,29 @@ the ISO 226:2003 contours (80 phon reference, 10 to 40 dB down) within about
 below the reference, so the output never exceeds the reference level and the
 shelves stay out of the boost rule. When the volume goes down, the lift
 follows about 24 ms later, after the lower output gain has arrived.
+
+**Detail (proximity, transients).** Meant for close-miked and binaural
+material such as ASMR. Both run per channel after the EQ and before the
+crossfeed. Binaural recordings are made for headphones already, so leave the
+crossfeed off for them.
+
+- *Proximity* splits each channel at 1.2 kHz (bilinear first-order, so the two
+  bands sum back exactly) and tracks the power of each band (20 ms). Every
+  16 frames the quieter side of each band is turned down by amount × the level
+  difference, at most 18 dB. At 100 % a 6 dB difference becomes 12 dB. The
+  louder side and centred sound are untouched. Quiet passages (below about
+  -65 dBFS) stay neutral. The low-pass and high-pass halves are in quadrature,
+  so with both gains at or below 1 the output never exceeds the input, and no
+  headroom is taken.
+- *Transients* high-passes each channel at the crossover (Butterworth) and
+  smooths its power over 1 ms (fast). A slow envelope follows that with a
+  15 ms attack and 20 ms release. While the fast envelope leads (an onset), the
+  high band is added again, reaching the full lift at a 6 dB lead. A steady tone has
+  no lead and passes unchanged, and levels below -70 dBFS are ignored. The
+  worst case max(1, |1 + G·HP|) is part of the automatic headroom, so
+  the overall level drops by the maximum lift (10 dB at 100 %, about 5 dB at
+  50 %). The host test measures +8.8 dB on 6 kHz tone-burst onsets at 100 %
+  and none at 200 Hz, with the output never above the input peak.
 
 **EQ filters.** Each band runs as a trapezoidal state-variable filter (Simper)
 with exactly the RBJ cookbook response. A direct-form biquad in float32

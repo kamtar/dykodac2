@@ -155,6 +155,22 @@ class Chain:
         self.trim_l = 10 ** (-s.balance_db / 20) if s.balance_db > 0 else 1.0
         self.trim_r = 10 ** (s.balance_db / 20) if s.balance_db < 0 else 1.0
         self.centres = [b.frequency_hz for b in s.bands if s.eq_enabled and b.type != p.FILTER_OFF]
+        # Transient shaper: x + b G HP(x), b in [0, 1] (proximity only cuts).
+        self.transient = None
+        if s.transient_enabled:
+            hp = design_band(p.EqBand(type=p.FILTER_HIGH_PASS, channels=p.CH_BOTH,
+                                      frequency_hz=float(s.transient_crossover_hz), q=0.7071), fs)
+            boost = 10 ** (p.MAX_TRANSIENT_BOOST_DB * s.transient_amount_pct / 100 / 20) - 1
+            self.transient = (hp, boost)
+            self.centres.append(float(s.transient_crossover_hz))
+
+    def _transient_bound(self, w: float) -> float:
+        if not self.transient:
+            return 1.0
+        (b0, b1, b2, a1, a2), boost = self.transient
+        zi = cmath.exp(-1j * w)
+        h = (b0 + b1 * zi + b2 * zi * zi) / (1 + a1 * zi + a2 * zi * zi)
+        return max(1.0, abs(1 + boost * h))
 
     def eq_db(self, f: float, left: bool = True) -> float:
         w = 2 * math.pi * f / self.fs
@@ -175,11 +191,12 @@ class Chain:
             pairs = [(abs(d), abs(c)) for d, c in self.xf(w)]
             ol = max(hi * el + lo * er for hi, lo in pairs)
             orr = max(hi * er + lo * el for hi, lo in pairs)
-        return max(ol * self.trim_l, orr * self.trim_r)
+        t = self._transient_bound(w)
+        return max(ol * self.trim_l * t, orr * self.trim_r * t)
 
     def boost_db(self) -> float:
         """Same grid, centres and 0.1 dB margin as the firmware."""
-        if not self.left and not self.right and not self.xf:
+        if not self.left and not self.right and not self.xf and not self.transient:
             return 0.0
         top, n = 0.499 * self.fs, 192
         ratio = (top / 10.0) ** (1 / (n - 1))

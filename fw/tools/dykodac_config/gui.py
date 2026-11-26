@@ -459,6 +459,45 @@ class MainWindow(QMainWindow):
         self.l_loud.setWordWrap(True)
         gf.addRow("", self.l_loud)
         lv.addWidget(g)
+
+        g = QGroupBox("Detail  (for close-miked / binaural material, e.g. ASMR)")
+        gf = QFormLayout(g)
+        prox = QHBoxLayout()
+        self.cb_prox = QCheckBox("On")
+        self.cb_prox.setToolTip(
+            "Proximity: exaggerates the level difference between the ears (below and above 1.2 kHz),\n"
+            "so sounds near one ear seem closer and ear-to-ear movement wider. The louder side is\n"
+            "left alone and the quieter side is turned down (up to 18 dB), so it needs no headroom.\n"
+            "Centred sound is unchanged. Best on binaural recordings; turn crossfeed off for those.")
+        self.s_prox_amount = QSpinBox(minimum=p.MIN_DETAIL_AMOUNT, maximum=p.MAX_DETAIL_AMOUNT,
+                                      singleStep=10, suffix=" %")
+        self.s_prox_amount.setToolTip("100 % doubles the level difference (6 dB becomes 12 dB).")
+        prox.addWidget(self.cb_prox)
+        prox.addWidget(QLabel("amount"))
+        prox.addWidget(self.s_prox_amount)
+        prox.addStretch()
+        gf.addRow("Proximity", prox)
+        tr = QHBoxLayout()
+        self.cb_tr = QCheckBox("On")
+        self.cb_tr.setToolTip(
+            "Transient shaper: lifts the onsets of the treble (taps, crinkles, brushing, consonants)\n"
+            "for ~15 ms and leaves steady sound, hiss and bass alone. Not an EQ: a sustained tone is\n"
+            "unchanged. The lift is covered by the automatic headroom, so the overall level drops by\n"
+            "the maximum lift (about 5 dB at 50 %).")
+        self.s_tr_amount = QSpinBox(minimum=p.MIN_DETAIL_AMOUNT, maximum=p.MAX_DETAIL_AMOUNT,
+                                    singleStep=10, suffix=" %")
+        self.s_tr_amount.setToolTip(f"100 % = up to +{p.MAX_TRANSIENT_BOOST_DB:g} dB on onsets above the crossover.")
+        self.s_tr_xover = QSpinBox(minimum=p.MIN_TRANSIENT_HZ, maximum=p.MAX_TRANSIENT_HZ, singleStep=100,
+                                   suffix=" Hz")
+        self.s_tr_xover.setToolTip("Only content above this frequency is shaped.")
+        tr.addWidget(self.cb_tr)
+        tr.addWidget(QLabel("amount"))
+        tr.addWidget(self.s_tr_amount)
+        tr.addWidget(QLabel("above"))
+        tr.addWidget(self.s_tr_xover)
+        tr.addStretch()
+        gf.addRow("Transients", tr)
+        lv.addWidget(g)
         lv.addStretch()
         split.addWidget(left)
 
@@ -544,7 +583,10 @@ class MainWindow(QMainWindow):
         for w in (self.c_filter, self.c_xf, self.c_leveler):
             w.currentIndexChanged.connect(self._changed)
         self.cb_loud.toggled.connect(self._changed)
-        for w in (self.s_lev_target, self.s_lev_cut, self.s_loud_ref, self.s_loud_amount, self.s_loud_boost):
+        self.cb_prox.toggled.connect(self._changed)
+        self.cb_tr.toggled.connect(self._changed)
+        for w in (self.s_lev_target, self.s_lev_cut, self.s_loud_ref, self.s_loud_amount, self.s_loud_boost,
+                  self.s_prox_amount, self.s_tr_amount, self.s_tr_xover):
             w.valueChanged.connect(self._changed)
         self.c_headroom.currentIndexChanged.connect(self._headroom_preset)
         self.s_headroom.valueChanged.connect(self._changed)
@@ -740,6 +782,11 @@ class MainWindow(QMainWindow):
             self.s_loud_ref.setValue(s.loudness_reference_db)
             self.s_loud_amount.setValue(int(s.loudness_amount_pct))
             self.s_loud_boost.setValue(int(s.loudness_max_boost_db))
+            self.cb_prox.setChecked(s.proximity_enabled)
+            self.s_prox_amount.setValue(int(s.proximity_amount_pct))
+            self.cb_tr.setChecked(s.transient_enabled)
+            self.s_tr_amount.setValue(int(s.transient_amount_pct))
+            self.s_tr_xover.setValue(int(s.transient_crossover_hz))
             self.cb_eq.setChecked(s.eq_enabled)
             for (t, ch, fr, ga, q), b in zip(self.band_widgets, s.bands):
                 t.setCurrentIndex(b.type)
@@ -769,6 +816,11 @@ class MainWindow(QMainWindow):
         s.loudness_reference_db = round(self.s_loud_ref.value() * 256) / 256
         s.loudness_amount_pct = self.s_loud_amount.value()
         s.loudness_max_boost_db = self.s_loud_boost.value()
+        s.proximity_enabled = self.cb_prox.isChecked()
+        s.proximity_amount_pct = self.s_prox_amount.value()
+        s.transient_enabled = self.cb_tr.isChecked()
+        s.transient_amount_pct = self.s_tr_amount.value()
+        s.transient_crossover_hz = self.s_tr_xover.value()
         s.eq_enabled = self.cb_eq.isChecked()
         s.bands = []
         for t, ch, fr, ga, q in self.band_widgets:
@@ -828,7 +880,7 @@ class MainWindow(QMainWindow):
         self._sync_preset_combo()
         eff = s.headroom_db - boost
         txt = (f"Effective headroom: <b>{eff:+.2f} dB</b>"
-               f" = {s.headroom_db:+.2f} dB set − {boost:.2f} dB EQ/crossfeed boost (automatic)")
+               f" = {s.headroom_db:+.2f} dB set − {boost:.2f} dB EQ/crossfeed/transient boost (automatic)")
         if s.headroom_db == 0 and boost == 0:
             txt += f"<br><span style='color:{WARN}'>0 dB: inter-sample peaks of loud masters will clip.</span>"
         self.l_effective.setText(txt)
@@ -841,6 +893,9 @@ class MainWindow(QMainWindow):
             w.setEnabled(s.leveler_mode != 0)
         for w in (self.s_loud_ref, self.b_loud_ref, self.s_loud_amount, self.s_loud_boost):
             w.setEnabled(s.loudness_enabled)
+        self.s_prox_amount.setEnabled(s.proximity_enabled)
+        for w in (self.s_tr_amount, self.s_tr_xover):
+            w.setEnabled(s.transient_enabled)
         self._render_loudness()
         for i, (t, ch, fr, ga, q) in enumerate(self.band_widgets):
             active = t.currentIndex() != p.FILTER_OFF
